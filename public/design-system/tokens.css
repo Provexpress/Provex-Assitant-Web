@@ -1,0 +1,127 @@
+:root {
+  --px-navy: #1A2B6B;
+  --px-blue: #1565C0;
+  --px-blue-deep: #1B2B8C;
+  --px-blue-bright: #2D4FD6;
+  --px-purple: #6A3FA0;
+  --px-purple-bright: #8B5FC8;
+  --px-cyan: #2ABFDF;
+  --px-green: #16A34A;
+  --px-green-dark: #16815A;
+  --px-green-bright: #0DBF82;
+  --px-amber: #D97706;
+  --px-amber-bright: #F0A020;
+  --px-red: #C62828;
+  --px-red-bright: #E84040;
+
+  --px-bg: #F5F7FD;
+  --px-surface: #FFFFFF;
+  --px-surface-raised: #FAFCFF;
+  --px-surface-soft: #F4F7FF;
+  --px-surface-tint: #EEF3FF;
+  --px-border: #D7E0F0;
+  --px-border-strong: #DDE5F2;
+  --px-text: #1A2B6B;
+  --px-text-strong: #172033;
+  --px-text-soft: #2F437F;
+  --px-muted: #677592;
+  --px-muted-2: #9B9B9B;
+
+  --px-dark-bg: #06071A;
+  --px-dark-surface: #0A0C22;
+  --px-dark-card: #0E1030;
+  --px-dark-card-alt: #121438;
+  --px-dark-border: #1A1E42;
+  --px-dark-border-strong: #222650;
+  --px-dark-text: #E0E6F8;
+  --px-dark-text-strong: #F7FAFF;
+  --px-dark-muted: #5A6A9A;
+  --px-dark-muted-2: #8A9ACC;
+
+  --px-gradient-brand: linear-gradient(135deg, var(--px-navy) 0%, var(--px-blue) 48%, var(--px-purple) 100%);
+  --px-gradient-brand-cyan: linear-gradient(90deg, var(--px-navy), var(--px-blue), var(--px-purple), var(--px-cyan));
+  --px-gradient-blue-cyan: linear-gradient(135deg, var(--px-blue), var(--px-cyan));
+  --px-gradient-bg: radial-gradient(circle at 18% 12%, rgba(106, 63, 160, 0.13), transparent 28rem),
+    radial-gradient(circle at 82% 18%, rgba(42, 191, 223, 0.16), transparent 30rem),
+    linear-gradient(180deg, #EEF3FF 0%, #F4F7FF 42%, #F5F7FD 100%);
+  --px-gradient-dark-bg: radial-gradient(circle at 8% 0%, rgba(107, 63, 160, 0.12), transparent 30rem),
+    radial-gradient(circle at 90% 12%, rgba(45, 79, 214, 0.11), transparent 28rem),
+    linear-gradient(180deg, #06071A 0%, #0A0C22 100%);
+
+  --px-font-ui: "Futura PT", "Futura Std", "Futura", "Twentieth Century", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --px-font-operational: Inter, "Segoe UI", Arial, sans-serif;
+  --px-font-display: "Syne", var(--px-font-ui);
+  --px-font-data: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+
+  --px-text-xs: 0.68rem;
+  --px-text-sm: 0.78rem;
+  --px-text-md: 0.9rem;
+  --px-text-base: 1rem;
+  --px-text-panel: 1.15rem;
+  --px-text-page: clamp(1.45rem, 2.4vw, 2.35rem);
+  --px-text-hero: clamp(30px, 4vw, 42px);
+  --px-text-kpi: clamp(1.45rem, 2.8vw, 2rem);
+
+  --px-line-tight: 1.08;
+  --px-line-heading: 1.2;
+  --px-line-base: 1.55;
+
+  --px-weight-regular: 400;
+  --px-weight-medium: 600;
+  --px-weight-bold: 700;
+  --px-weight-black: 800;
+
+  --px-space-1: 4px;
+  --px-space-1-5: 6px;
+  --px-space-2: 8px;
+  --px-space-2-5: 10px;
+  --px-space-3: 12px;
+  --px-space-3-5: 14px;
+  --px-space-4: 16px;
+  --px-space-4-5: 18px;
+  --px-space-5: 20px;
+  --px-space-6: 24px;
+  --px-space-7: 28px;
+  --px-space-8: 32px;
+  --px-space-10: 40px;
+  --px-space-12: 48px;
+
+  --px-radius-xs: 6px;
+  --px-radius-sm: 8px;
+  --px-radius-md: 10px;
+  --px-radius-lg: 12px;
+  --px-radius-xl: 16px;
+  --px-radius-2xl: 18px;
+  --px-radius-pill: 999px;
+  --px-radius-round: 50%;
+
+  --px-shadow-xs: 0 8px 18px rgba(26, 43, 107, 0.05);
+  --px-shadow-sm: 0 10px 26px rgba(26, 43, 107, 0.06);
+  --px-shadow-md: 0 18px 42px rgba(26, 43, 107, 0.08);
+  --px-shadow-lg: 0 24px 54px rgba(26, 43, 107, 0.12);
+  --px-shadow-action: 0 14px 26px rgba(26, 43, 107, 0.16);
+  --px-shadow-focus: 0 0 0 4px rgba(21, 101, 192, 0.16);
+  --px-shadow-dark: 0 12px 48px rgba(0, 0, 0, 0.5);
+
+  --px-transition: 0.2s ease;
+  --px-container-compact: 960px;
+  --px-container: 1120px;
+  --px-container-wide: 1500px;
+  --px-container-dashboard: 1680px;
+}
+
+.px-theme--dark {
+  --px-bg: var(--px-dark-bg);
+  --px-surface: var(--px-dark-surface);
+  --px-surface-raised: var(--px-dark-card);
+  --px-surface-soft: var(--px-dark-card-alt);
+  --px-surface-tint: #111638;
+  --px-border: var(--px-dark-border);
+  --px-border-strong: var(--px-dark-border-strong);
+  --px-text: var(--px-dark-text);
+  --px-text-strong: var(--px-dark-text-strong);
+  --px-text-soft: var(--px-dark-muted-2);
+  --px-muted: var(--px-dark-muted);
+  --px-muted-2: var(--px-dark-muted-2);
+}
+
