@@ -13,3 +13,5 @@ RELLENADO_*.pdf
 formularios_rellenados.zip
 .DS_Store
 Thumbs.db
+
+.vercel/
