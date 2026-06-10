@@ -197,6 +197,26 @@
   border-radius: var(--px-radius-lg);
 }
 
+.px-logo--brand {
+  padding: 6px;
+  color: transparent;
+  background: #fff;
+  overflow: hidden;
+}
+
+.px-logo--brand img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.px-logo--wide {
+  width: 132px;
+  height: 82px;
+  border-radius: var(--px-radius-lg);
+}
+
 .px-feature-list {
   display: grid;
   gap: var(--px-space-2-5);

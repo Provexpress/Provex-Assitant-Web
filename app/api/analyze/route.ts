@@ -50,6 +50,9 @@ export async function POST(request: NextRequest) {
     const imageDataUrl = String(body.imageDataUrl || "");
     const contractorData = body.contractorData || {};
     const memoryHints = String(body.memoryHints || "Sin memoria historica.");
+    const pageNumber = Number(body.pageNumber || 1);
+    const pageWidth = Number(body.pageWidth || 595);
+    const pageHeight = Number(body.pageHeight || 842);
 
     if (!imageDataUrl.startsWith("data:image/png;base64,")) {
       return NextResponse.json({ error: "Imagen invalida" }, { status: 400 });
@@ -64,17 +67,28 @@ ${JSON.stringify(contractorData, null, 2)}
 MEMORIA HISTORICA:
 ${memoryHints}
 
-Identifica campos vacios: lineas, espacios en blanco, checkboxes, firma y huella.
+PAGINA:
+- Numero: ${pageNumber}
+- Ancho PDF: ${pageWidth} puntos
+- Alto PDF: ${pageHeight} puntos
+
+Identifica campos vacios: lineas, espacios en blanco, checkboxes, firma y huella. Usa los DATOS DEL CONTRATISTA para proponer el valor correcto.
 
 Devuelve SOLO JSON valido:
-{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"","x":120,"y":95,"tipo":"texto","fontsize":9,"w":120,"h":22,"confianza":0.6}]}
+{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.6}]}
 
 Reglas:
 - Coordenadas en puntos PDF, origen arriba-izquierda.
 - La imagen fue renderizada a 2x, divide pixeles entre 2.
-- Escribe donde empieza el espacio vacio, no sobre la etiqueta.
+- x/y son la esquina superior izquierda de la caja editable que se vera sobre el PDF.
+- Escribe donde empieza el espacio vacio o la linea para llenar, no sobre la etiqueta impresa.
+- El texto debe quedar dentro de la linea o espacio disponible. Devuelve w/h aproximados del espacio real para poder encoger texto largo.
+- Si el valor es muy largo, aumenta w hasta el final de la linea disponible; no lo dejes encima de otras palabras.
+- No agregues campos que ya esten diligenciados con datos claros de otra empresa/persona.
 - No repitas campos.
 - tipo solo puede ser texto, checkbox, firma o huella.
+- Para firma usa tipo firma y valor "firma". Para huella usa tipo huella y valor "huella".
+- Para checkbox usa valor "X" solo en la casilla correcta; si no estas seguro deja valor vacio.
 - Si no sabes el valor, deja valor vacio.`;
 
     const response = await client.chat.completions.create({

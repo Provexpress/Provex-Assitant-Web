@@ -18,6 +18,8 @@ export type PdfField = {
   campoCsv?: string;
   iaX?: number;
   iaY?: number;
+  suggestedX?: number;
+  suggestedY?: number;
 };
 
 export type FieldOption = {

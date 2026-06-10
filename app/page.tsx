@@ -24,6 +24,7 @@ type PdfJsDocument = {
 
 type PdfJsPage = {
   getViewport: (options: { scale: number }) => { width: number; height: number };
+  getTextContent: () => Promise<{ items: Array<{ str?: string }> }>;
   render: (options: {
     canvasContext: CanvasRenderingContext2D;
     viewport: { width: number; height: number };
@@ -148,7 +149,9 @@ function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: 
     confianza: Number(raw.confianza || 0.55),
     source: "ia",
     iaX: x,
-    iaY: y
+    iaY: y,
+    suggestedX: x,
+    suggestedY: y
   };
 }
 
@@ -170,6 +173,19 @@ function fitFontSize(font: { widthOfTextAtSize: (text: string, size: number) => 
   return size;
 }
 
+async function extractPdfText(pdfDocument: PdfJsDocument, maxPages = 3) {
+  const chunks: string[] = [];
+  const pagesToRead = Math.min(pdfDocument.numPages, maxPages);
+
+  for (let index = 0; index < pagesToRead; index += 1) {
+    const page = await pdfDocument.getPage(index + 1);
+    const content = await page.getTextContent();
+    chunks.push(content.items.map((item) => item.str || "").join(" "));
+  }
+
+  return chunks.join("\n").replace(/\s+/g, " ").trim().slice(0, 5000);
+}
+
 export default function Home() {
   const contractorData = useMemo(() => getContractorData(), []);
   const fieldOptions = useMemo(() => getFieldOptions(), []);
@@ -185,6 +201,7 @@ export default function Home() {
   const [pdfDoc, setPdfDoc] = useState<PdfJsDocument | null>(null);
   const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
   const [fileName, setFileName] = useState("");
+  const [currentMemoryKey, setCurrentMemoryKey] = useState("");
   const [pageNum, setPageNum] = useState(0);
   const [pageSize, setPageSize] = useState({ width: 595, height: 842 });
   const [zoom, setZoom] = useState(1.35);
@@ -327,31 +344,42 @@ export default function Home() {
     const bytes = await file.arrayBuffer();
     const pdfjs = await loadPdfJs();
     const document = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+    const activeMemory = memory || loadMemory();
+    if (!memory) setMemory(activeMemory);
+    const pdfText = await extractPdfText(document);
+    const contentCode = detectCode(`${file.name}\n${pdfText}`);
+    const fileCode = detectCode(file.name);
+    const knownKey = activeMemory.formulariosConocidos[contentCode] ? contentCode : activeMemory.formulariosConocidos[fileCode] ? fileCode : "";
+
     setPdfBytes(bytes);
     setPdfDoc(document);
     setFileName(file.name);
+    setCurrentMemoryKey(contentCode || fileCode);
     setPageNum(0);
     setFields([]);
     setSelectedId("");
 
-    const code = detectCode(file.name);
-    const known = memory?.formulariosConocidos[code];
+    const known = knownKey ? activeMemory.formulariosConocidos[knownKey] : undefined;
     if (known?.fields?.length) {
       const remembered = autocompleteFields(
         known.fields.map((field) => ({
           ...field,
           id: newFieldId("mem"),
           source: "memoria",
-          confianza: Math.max(field.confianza, 0.9)
+          confianza: Math.max(field.confianza, 0.93),
+          iaX: field.x,
+          iaY: field.y,
+          suggestedX: field.x,
+          suggestedY: field.y
         })),
         contractorData
       );
       setFields(remembered);
-      setStatus(`Usando memoria local para ${code}.`);
+      setStatus(`Usando memoria exacta para ${knownKey}. No se aplicaron promedios ni offsets.`);
     } else {
       setStatus("PDF cargado. Analizando automaticamente con IA...");
       try {
-        await analyzeDocument(document);
+        await analyzeDocument(document, activeMemory);
       } catch (error) {
         setStatus(error instanceof Error ? `La IA no pudo analizar: ${error.message}` : "La IA no pudo analizar el PDF. Puedes agregar campos manualmente.");
       }
@@ -375,7 +403,9 @@ export default function Home() {
       source: "manual",
       campoCsv: option.key,
       iaX: x,
-      iaY: y
+      iaY: y,
+      suggestedX: x,
+      suggestedY: y
     };
     setFields((current) => [...current, field]);
     setSelectedId(field.id);
@@ -420,7 +450,9 @@ export default function Home() {
       source: "manual",
       confianza: Math.min(field.confianza, 0.6),
       iaX: field.x + dx,
-      iaY: field.y + dy
+      iaY: field.y + dy,
+      suggestedX: field.x + dx,
+      suggestedY: field.y + dy
     };
     setFields((current) => [...current, copy]);
     setSelectedId(copy.id);
@@ -523,9 +555,10 @@ export default function Home() {
     window.removeEventListener("pointermove", onResizeMove);
   }
 
-  async function analyzeDocument(pdfDocument: PdfJsDocument) {
+  async function analyzeDocument(pdfDocument: PdfJsDocument, memoryOverride: LocalMemory | null = memory) {
     setStatus("Analizando con IA...");
     const detected: PdfField[] = [];
+    const activeMemory = memoryOverride || memory;
 
     for (let index = 0; index < pdfDocument.numPages; index += 1) {
       const page = await pdfDocument.getPage(index + 1);
@@ -543,7 +576,10 @@ export default function Home() {
         body: JSON.stringify({
           imageDataUrl: canvas.toDataURL("image/png"),
           contractorData,
-          memoryHints: memory ? memoryHints(memory) : ""
+          memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+          pageNumber: index + 1,
+          pageWidth: page.getViewport({ scale: 1 }).width,
+          pageHeight: page.getViewport({ scale: 1 }).height
         })
       });
 
@@ -555,7 +591,7 @@ export default function Home() {
     }
 
     const completedFields = autocompleteFields(detected, contractorData);
-    setFields(memory ? applyMemoryOffsets(memory, completedFields) : completedFields);
+    setFields(activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields);
     setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
   }
 
@@ -610,8 +646,22 @@ export default function Home() {
     const blob = new Blob([pdfBuffer], { type: "application/pdf" });
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
     setDownloadUrl(URL.createObjectURL(blob));
-    if (memory) setMemory(learnFromConfirmation(memory, fileName, fields));
-    setStatus("PDF generado. La memoria local aprendio esta correccion.");
+    if (memory) {
+      const learned = learnFromConfirmation(memory, currentMemoryKey || fileName, fields, [fileName]);
+      setMemory(learned);
+      setFields((current) =>
+        current.map((field) => ({
+          ...field,
+          source: "memoria",
+          confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
+          iaX: field.x,
+          iaY: field.y,
+          suggestedX: field.x,
+          suggestedY: field.y
+        }))
+      );
+    }
+    setStatus("PDF generado. La memoria local guardo estas posiciones exactas.");
   }
 
   if (!account) {
@@ -620,7 +670,9 @@ export default function Home() {
         <section className="px-auth-card">
           <div className="px-auth-brand">
             <div>
-              <div className="px-logo">PX</div>
+              <div className="px-logo px-logo--brand px-logo--wide">
+                <img alt="Provexpress" src="/brand/provex-logo.jpeg" />
+              </div>
               <p className="px-eyebrow px-mt-4">Provex Assistant Web</p>
               <h1 className="px-title px-title--hero">Editor de PDFs con IA</h1>
               <p className="px-copy">Rellena formularios, revisa en el PDF y descarga el archivo listo.</p>
@@ -632,7 +684,9 @@ export default function Home() {
             </div>
           </div>
           <div className="px-auth-action">
-            <div className="px-logo px-logo--sm">PX</div>
+            <div className="px-logo px-logo--sm px-logo--brand">
+              <img alt="Provexpress" src="/brand/provex-icon.png" />
+            </div>
             <h2 className="px-title px-mt-4">Continuar con Microsoft</h2>
             <p className="px-copy">Usa tu cuenta corporativa para entrar al editor.</p>
             <button className="px-btn px-btn--primary px-mt-4" type="button" onClick={loginMicrosoft}>
@@ -649,7 +703,9 @@ export default function Home() {
     <main className="app-frame">
       <header className="px-topbar">
         <div className="px-brand">
-          <div className="px-logo px-logo--sm">PX</div>
+          <div className="px-logo px-logo--sm px-logo--brand">
+            <img alt="Provexpress" src="/brand/provex-icon.png" />
+          </div>
           <div className="px-brand__meta">
             <h1 className="px-brand__title">Provex Assistant Web</h1>
             <p className="px-brand__subtitle">{account.username}</p>
@@ -869,6 +925,9 @@ export default function Home() {
             <h2 className="px-panel__title">Memoria local</h2>
             <p className="px-panel__copy">
               {memory ? `${Object.keys(memory.formulariosConocidos).length} formularios y ${memory.historialCorrecciones.length} correcciones en este navegador.` : "Cargando memoria..."}
+            </p>
+            <p className="px-help px-mt-4">
+              Al generar, se guardan las coordenadas exactas confirmadas para que el mismo formato vuelva a caer en el mismo punto.
             </p>
             <button className="px-btn px-btn--ghost px-mt-4" type="button" onClick={() => setMemory(resetMemory())}>
               Restaurar semilla

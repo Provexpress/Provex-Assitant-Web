@@ -30,7 +30,11 @@ function legacyToLocalMemory(): LocalMemory {
           h: Number(field.h || (tipo === "firma" ? 40 : tipo === "huella" ? 80 : 22)),
           fontSize: Number(field.fontsize || 9),
           confianza: Number(field.confianza || 0.75),
-          source: "memoria"
+          source: "memoria",
+          iaX: Number(field.x || 0),
+          iaY: Number(field.y || 0),
+          suggestedX: Number(field.x || 0),
+          suggestedY: Number(field.y || 0)
         });
       }
     }
@@ -95,22 +99,40 @@ export function resetMemory(): LocalMemory {
   return seeded;
 }
 
-export function learnFromConfirmation(memory: LocalMemory, pdfName: string, fields: PdfField[]): LocalMemory {
-  const next: LocalMemory = structuredClone(memory);
-  const code = detectCode(pdfName);
-
-  next.formulariosConocidos[code] = {
-    fields: fields.map((field) => ({ ...field, source: "memoria", confianza: Math.min(0.98, field.confianza + 0.08) })),
-    vecesProcesado: (next.formulariosConocidos[code]?.vecesProcesado || 0) + 1
+function savedField(field: PdfField): PdfField {
+  return {
+    ...field,
+    source: "memoria",
+    confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
+    iaX: field.x,
+    iaY: field.y,
+    suggestedX: field.x,
+    suggestedY: field.y
   };
+}
+
+export function learnFromConfirmation(memory: LocalMemory, memoryKey: string, fields: PdfField[], aliases: string[] = []): LocalMemory {
+  const next: LocalMemory = structuredClone(memory);
+  const code = detectCode(memoryKey);
+  const keys = Array.from(new Set([code, ...aliases.map((alias) => detectCode(alias))].filter(Boolean)));
+  const confirmedFields = fields.map(savedField);
+
+  for (const key of keys) {
+    next.formulariosConocidos[key] = {
+      fields: confirmedFields,
+      vecesProcesado: (next.formulariosConocidos[key]?.vecesProcesado || 0) + 1
+    };
+  }
 
   for (const field of fields) {
-    const dx = Number(field.x || 0) - Number(field.iaX ?? field.x);
-    const dy = Number(field.y || 0) - Number(field.iaY ?? field.y);
+    const baseX = Number(field.suggestedX ?? field.iaX ?? field.x);
+    const baseY = Number(field.suggestedY ?? field.iaY ?? field.y);
+    const dx = Number(field.x || 0) - baseX;
+    const dy = Number(field.y || 0) - baseY;
     if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
       next.historialCorrecciones.push({
         fecha: new Date().toISOString().slice(0, 10),
-        pdf: pdfName,
+        pdf: memoryKey,
         campo: field.nombre,
         dx,
         dy
@@ -143,8 +165,42 @@ export function learnFromConfirmation(memory: LocalMemory, pdfName: string, fiel
 }
 
 export function detectCode(fileName: string): string {
-  const match = fileName.toUpperCase().match(/[A-Z]{2,}-?[A-Z0-9]{2,}-?\d+[A-Z]?/);
-  return match ? match[0].replace(/^INZ([A-Z]+)(\d)/, "INZ-$1-$2") : fileName.replace(/\.[^.]+$/, "");
+  const input = String(fileName || "");
+  const searchable = input.toUpperCase().replace(/[_\s]+/g, " ");
+  const explicit = searchable.match(/\b[A-Z]{2,}-[A-Z0-9]{2,}-\d+[A-Z]?\b/);
+  if (explicit) return normalizeFormCode(explicit[0]);
+
+  const compactToken = searchable.match(/\bINZ[A-Z]{2,}\d+[A-Z]?\b/);
+  if (compactToken) return normalizeFormCode(compactToken[0]);
+
+  const spacedInz = searchable.match(/\bINZ\s*-?\s*[A-Z]{2,}\s*-?\s*\d+[A-Z]?\b/);
+  if (spacedInz) return normalizeFormCode(spacedInz[0]);
+
+  const compact = searchable.replace(/[^A-Z0-9]/g, "");
+  const inzCompact = compact.match(/\bINZ[A-Z]{2,}\d+[A-Z]?\b/);
+  if (inzCompact) return normalizeFormCode(inzCompact[0]);
+
+  const firstUsefulLine = input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return (firstUsefulLine || input || "FORMULARIO")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^\w.-]+/g, "_")
+    .slice(0, 80);
+}
+
+function normalizeFormCode(code: string): string {
+  const raw = String(code || "").toUpperCase().replace(/[_\s]+/g, "").replace(/-+/g, "-");
+  if (raw.includes("-")) return raw;
+
+  const inz = raw.match(/^(INZ)([A-Z]+?)(\d+[A-Z]?)$/);
+  if (inz) return `${inz[1]}-${inz[2]}-${inz[3]}`;
+
+  const generic = raw.match(/^([A-Z]{2,})([A-Z0-9]{2,})(\d+[A-Z]?)$/);
+  if (generic) return `${generic[1]}-${generic[2]}-${generic[3]}`;
+
+  return raw;
 }
 
 function normalize(value: unknown): string {
@@ -162,7 +218,16 @@ function fieldContext(field: PdfField): string {
 
 export function applyMemoryOffsets(memory: LocalMemory, fields: PdfField[]): PdfField[] {
   return fields.map((field) => {
-    if (field.source === "memoria") return field;
+    if (field.source === "memoria") {
+      return {
+        ...field,
+        iaX: field.x,
+        iaY: field.y,
+        suggestedX: field.x,
+        suggestedY: field.y,
+        confianza: Math.max(field.confianza, 0.92)
+      };
+    }
 
     const exactContext = fieldContext(field);
     const typeContext = field.tipo;
@@ -171,7 +236,13 @@ export function applyMemoryOffsets(memory: LocalMemory, fields: PdfField[]): Pdf
       return context === exactContext || context.includes(exactContext) || context === typeContext;
     });
 
-    if (!matches.length) return field;
+    if (!matches.length) {
+      return {
+        ...field,
+        suggestedX: field.x,
+        suggestedY: field.y
+      };
+    }
 
     const totals = matches.reduce(
       (acc, pattern) => {
@@ -191,6 +262,8 @@ export function applyMemoryOffsets(memory: LocalMemory, fields: PdfField[]): Pdf
       ...field,
       x: Math.max(0, field.x + dx),
       y: Math.max(0, field.y + dy),
+      suggestedX: Math.max(0, field.x + dx),
+      suggestedY: Math.max(0, field.y + dy),
       confianza: Math.min(0.88, field.confianza + 0.12)
     };
   });
