@@ -159,6 +159,17 @@ function memoryHints(memory: LocalMemory) {
     .join("\n");
 }
 
+function fitFontSize(font: { widthOfTextAtSize: (text: string, size: number) => number }, text: string, maxSize: number, maxWidth: number) {
+  const safeText = text.replace(/\s+/g, " ").trim();
+  if (!safeText || maxWidth <= 4) return maxSize;
+
+  let size = clamp(maxSize, 5, 18);
+  while (size > 5 && font.widthOfTextAtSize(safeText, size) > maxWidth) {
+    size -= 0.5;
+  }
+  return size;
+}
+
 export default function Home() {
   const contractorData = useMemo(() => getContractorData(), []);
   const fieldOptions = useMemo(() => getFieldOptions(), []);
@@ -338,7 +349,12 @@ export default function Home() {
       setFields(remembered);
       setStatus(`Usando memoria local para ${code}.`);
     } else {
-      setStatus(`PDF cargado. Puedes editar manualmente o analizar con IA.`);
+      setStatus("PDF cargado. Analizando automaticamente con IA...");
+      try {
+        await analyzeDocument(document);
+      } catch (error) {
+        setStatus(error instanceof Error ? `La IA no pudo analizar: ${error.message}` : "La IA no pudo analizar el PDF. Puedes agregar campos manualmente.");
+      }
     }
   }
 
@@ -365,6 +381,22 @@ export default function Home() {
     setSelectedId(field.id);
     setSelectedQuick(option);
     setDownloadUrl("");
+    return field.id;
+  }
+
+  function addFieldFromDoubleClick(x: number, y: number) {
+    const option =
+      selectedQuick ||
+      ({
+        key: "texto_libre",
+        label: "Texto libre",
+        type: "texto",
+        value: ""
+      } satisfies FieldOption);
+    const id = addField(option, x, y);
+    if (option.type === "texto" || option.type === "checkbox") {
+      setEditingId(id);
+    }
   }
 
   function updateField(id: string, patch: Partial<PdfField>) {
@@ -491,13 +523,12 @@ export default function Home() {
     window.removeEventListener("pointermove", onResizeMove);
   }
 
-  async function analyzeWithAi() {
-    if (!pdfDoc) return;
+  async function analyzeDocument(pdfDocument: PdfJsDocument) {
     setStatus("Analizando con IA...");
     const detected: PdfField[] = [];
 
-    for (let index = 0; index < pdfDoc.numPages; index += 1) {
-      const page = await pdfDoc.getPage(index + 1);
+    for (let index = 0; index < pdfDocument.numPages; index += 1) {
+      const page = await pdfDocument.getPage(index + 1);
       const viewport = page.getViewport({ scale: 2 });
       const canvas = document.createElement("canvas");
       canvas.width = viewport.width;
@@ -520,12 +551,21 @@ export default function Home() {
       if (!response.ok) throw new Error(payload.error || "La IA fallo");
       const campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
       detected.push(...campos.map((field: Record<string, unknown>, fieldIndex: number) => normalizeAiField(field, index, fieldIndex)));
-      setStatus(`IA analizo ${index + 1}/${pdfDoc.numPages} paginas...`);
+      setStatus(`IA analizo ${index + 1}/${pdfDocument.numPages} paginas...`);
     }
 
     const completedFields = autocompleteFields(detected, contractorData);
     setFields(memory ? applyMemoryOffsets(memory, completedFields) : completedFields);
     setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
+  }
+
+  async function analyzeWithAi() {
+    if (!pdfDoc) return;
+    try {
+      await analyzeDocument(pdfDoc);
+    } catch (error) {
+      setStatus(error instanceof Error ? `La IA no pudo analizar: ${error.message}` : "La IA no pudo analizar el PDF.");
+    }
   }
 
   async function generatePdf() {
@@ -545,16 +585,18 @@ export default function Home() {
       const y = height - field.y - (field.tipo === "texto" || field.tipo === "checkbox" ? field.fontSize : field.h);
 
       if (field.tipo === "texto" && field.valor) {
+        const fittedSize = fitFontSize(font, field.valor, field.fontSize, Math.max(12, field.w - 4));
         page.drawText(field.valor, {
           x: field.x,
           y,
-          size: field.fontSize,
+          size: fittedSize,
           font,
           color: rgb(0, 0, 0),
           maxWidth: field.w
         });
       } else if (field.tipo === "checkbox" && field.valor) {
-        page.drawText("X", { x: field.x, y, size: field.fontSize, font, color: rgb(0, 0, 0) });
+        const fittedSize = fitFontSize(font, "X", field.fontSize, Math.max(10, field.w));
+        page.drawText("X", { x: field.x, y, size: fittedSize, font, color: rgb(0, 0, 0) });
       } else if (field.tipo === "firma") {
         page.drawImage(signature, { x: field.x, y, width: field.w, height: field.h });
       } else if (field.tipo === "huella") {
@@ -655,9 +697,8 @@ export default function Home() {
               className="pdf-page"
               style={{ width: pageSize.width * zoom, height: pageSize.height * zoom }}
               onDoubleClick={(event) => {
-                if (!selectedQuick) return;
                 const rect = event.currentTarget.getBoundingClientRect();
-                addField(selectedQuick, (event.clientX - rect.left) / zoom, (event.clientY - rect.top) / zoom);
+                addFieldFromDoubleClick((event.clientX - rect.left) / zoom, (event.clientY - rect.top) / zoom);
               }}
             >
               <canvas className="pdf-canvas" ref={canvasRef} />
@@ -683,7 +724,8 @@ export default function Home() {
                     }}
                     title={`${field.nombre} - confianza ${field.confianza.toFixed(2)}`}
                   >
-                    {editingId === field.id && (field.tipo === "texto" || field.tipo === "checkbox") ? (
+                    <span className="field-content">
+                      {editingId === field.id && (field.tipo === "texto" || field.tipo === "checkbox") ? (
                       <input
                         autoFocus
                         className="field-inline-input"
@@ -698,15 +740,16 @@ export default function Home() {
                           }
                         }}
                       />
-                    ) : field.tipo === "firma" ? (
-                      <img alt="Firma" src={transparentImages.firma} />
-                    ) : field.tipo === "huella" ? (
-                      <img alt="Huella" src={transparentImages.huella} />
-                    ) : field.tipo === "checkbox" ? (
-                      field.valor || "X"
-                    ) : (
-                      field.valor
-                    )}
+                      ) : field.tipo === "firma" ? (
+                        <img alt="Firma" src={transparentImages.firma} />
+                      ) : field.tipo === "huella" ? (
+                        <img alt="Huella" src={transparentImages.huella} />
+                      ) : field.tipo === "checkbox" ? (
+                        field.valor || "X"
+                      ) : (
+                        field.valor
+                      )}
+                    </span>
                     <button
                       className="field-resize"
                       type="button"

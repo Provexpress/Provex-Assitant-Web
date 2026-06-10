@@ -59,6 +59,17 @@ body {
   cursor: grab;
   user-select: none;
   white-space: nowrap;
+  overflow: visible;
+}
+
+.field-content {
+  width: 100%;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pdf-field:hover,
@@ -73,7 +84,7 @@ body {
   border-color: var(--px-purple);
 }
 
-.pdf-field img {
+.field-content img {
   width: 100%;
   height: 100%;
   object-fit: contain;
