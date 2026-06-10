@@ -666,6 +666,15 @@ export default function Home() {
           <button className="px-btn px-btn--ghost" type="button" onClick={() => setZoom((value) => Math.min(3, value + 0.1))}>
             Zoom +
           </button>
+          <button className="px-btn px-btn--ghost" type="button" disabled={!selectedField} onClick={copySelectedField}>
+            Copiar
+          </button>
+          <button className="px-btn px-btn--ghost" type="button" disabled={!copiedLabel} onClick={pasteCopiedField}>
+            Pegar
+          </button>
+          <button className="px-btn px-btn--ghost" type="button" disabled={!selectedField} onClick={() => selectedField && duplicateField(selectedField)}>
+            Duplicar
+          </button>
           <button className="px-btn px-btn--primary" type="button" disabled={!pdfDoc} onClick={analyzeWithAi}>
             Analizar con IA
           </button>
