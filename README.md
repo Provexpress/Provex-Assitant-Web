@@ -61,7 +61,21 @@ La app usa `window.location.origin` como redirect URI, por eso debe coincidir co
 2. Subir PDF.
 3. Analizar con IA o agregar campos rapidos.
 4. Arrastrar campos sobre el PDF.
-5. Generar y descargar PDF.
+5. Editar, copiar, pegar, redimensionar o borrar campos.
+6. Generar y descargar PDF.
+
+## Edicion del PDF
+
+- Doble click sobre un campo de texto: editar en el mismo PDF.
+- Arrastrar campo: mover.
+- Handle inferior derecho: redimensionar.
+- Flechas: mover fino.
+- Shift + flechas: mover rapido.
+- Ctrl+C / Ctrl+V: copiar y pegar campos.
+- Ctrl+D: duplicar campo.
+- Supr: eliminar campo.
+
+La firma y la huella se procesan en el navegador para quitar fondo blanco y dejarlas transparentes antes de insertarlas en el PDF final.
 
 ## Nota sobre memoria
 
@@ -69,5 +83,7 @@ No hay base de datos. La memoria vive en el navegador:
 
 - Pros: cero configuracion, sirve en Vercel inmediatamente.
 - Contras: cada usuario tiene su propia memoria local.
+
+La IA usa esa memoria como contexto y la app aplica offsets aprendidos antes de mostrar los campos al usuario.
 
 Si luego quieren memoria compartida, se puede migrar a Vercel KV o Supabase sin cambiar el editor.

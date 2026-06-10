@@ -115,6 +115,26 @@ export function learnFromConfirmation(memory: LocalMemory, pdfName: string, fiel
         dx,
         dy
       });
+      const contexto = fieldContext(field);
+      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
+      if (pattern) {
+        const count = Math.max(0, pattern.vecesCorregido || 0);
+        pattern.offsetX = (pattern.offsetX * count + dx) / (count + 1);
+        pattern.offsetY = (pattern.offsetY * count + dy) / (count + 1);
+        pattern.vecesCorregido = count + 1;
+      } else {
+        next.patronesGlobales.push({
+          contexto,
+          offsetX: dx,
+          offsetY: dy,
+          vecesAplicado: 0,
+          vecesCorregido: 1
+        });
+      }
+    } else {
+      const contexto = fieldContext(field);
+      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
+      if (pattern) pattern.vecesAplicado = (pattern.vecesAplicado || 0) + 1;
     }
   }
 
@@ -125,4 +145,53 @@ export function learnFromConfirmation(memory: LocalMemory, pdfName: string, fiel
 export function detectCode(fileName: string): string {
   const match = fileName.toUpperCase().match(/[A-Z]{2,}-?[A-Z0-9]{2,}-?\d+[A-Z]?/);
   return match ? match[0].replace(/^INZ([A-Z]+)(\d)/, "INZ-$1-$2") : fileName.replace(/\.[^.]+$/, "");
+}
+
+function normalize(value: unknown): string {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function fieldContext(field: PdfField): string {
+  return `${field.tipo}:${normalize(field.nombre)}`;
+}
+
+export function applyMemoryOffsets(memory: LocalMemory, fields: PdfField[]): PdfField[] {
+  return fields.map((field) => {
+    if (field.source === "memoria") return field;
+
+    const exactContext = fieldContext(field);
+    const typeContext = field.tipo;
+    const matches = memory.patronesGlobales.filter((pattern) => {
+      const context = normalize(pattern.contexto);
+      return context === exactContext || context.includes(exactContext) || context === typeContext;
+    });
+
+    if (!matches.length) return field;
+
+    const totals = matches.reduce(
+      (acc, pattern) => {
+        const weight = Math.max(1, (pattern.vecesAplicado || 0) + (pattern.vecesCorregido || 0));
+        acc.x += pattern.offsetX * weight;
+        acc.y += pattern.offsetY * weight;
+        acc.weight += weight;
+        return acc;
+      },
+      { x: 0, y: 0, weight: 0 }
+    );
+
+    const dx = totals.x / totals.weight;
+    const dy = totals.y / totals.weight;
+
+    return {
+      ...field,
+      x: Math.max(0, field.x + dx),
+      y: Math.max(0, field.y + dy),
+      confianza: Math.min(0.88, field.confianza + 0.12)
+    };
+  });
 }

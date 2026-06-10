@@ -80,6 +80,36 @@ body {
   pointer-events: none;
 }
 
+.field-resize {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  width: 13px;
+  height: 13px;
+  display: none;
+  border: 1px solid var(--px-blue);
+  border-radius: 3px;
+  background: #fff;
+  cursor: nwse-resize;
+  padding: 0;
+}
+
+.pdf-field.is-selected .field-resize {
+  display: block;
+}
+
+.field-inline-input {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  outline: 2px solid var(--px-blue);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #000;
+  font: inherit;
+  padding: 0 4px;
+}
+
 .side-panel {
   position: sticky;
   top: 12px;
@@ -129,6 +159,13 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.edit-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-wrap: wrap;
 }
 

@@ -5,7 +5,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { autocompleteFields } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
-import { detectCode, learnFromConfirmation, loadMemory, resetMemory } from "../lib/memory";
+import { applyMemoryOffsets, detectCode, learnFromConfirmation, loadMemory, resetMemory } from "../lib/memory";
 import type { FieldOption, FieldType, LocalMemory, PdfField } from "../lib/types";
 
 declare global {
@@ -37,6 +37,19 @@ type DragState = {
   startY: number;
   startFieldX: number;
   startFieldY: number;
+};
+
+type ResizeState = {
+  id: string;
+  startX: number;
+  startY: number;
+  startW: number;
+  startH: number;
+};
+
+type TransparentImages = {
+  firma: string;
+  huella: string;
 };
 
 const pdfJsUrl = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
@@ -79,6 +92,42 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+async function makeWhiteTransparent(src: string): Promise<string> {
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error(`No se pudo cargar ${src}`));
+    image.src = src;
+  });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  if (!context) return src;
+
+  context.drawImage(image, 0, 0);
+  const data = context.getImageData(0, 0, canvas.width, canvas.height);
+  for (let index = 0; index < data.data.length; index += 4) {
+    const red = data.data[index];
+    const green = data.data[index + 1];
+    const blue = data.data[index + 2];
+    const alpha = data.data[index + 3];
+    if (alpha > 0 && red >= 242 && green >= 242 && blue >= 242) {
+      data.data[index + 3] = 0;
+    }
+  }
+  context.putImageData(data, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  if (!element) return false;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName) || element.isContentEditable;
+}
+
 function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: number): PdfField {
   const tipo = String(raw.tipo || "texto").toLowerCase() as FieldType;
   const safeType: FieldType = ["texto", "checkbox", "firma", "huella"].includes(tipo) ? tipo : "texto";
@@ -115,6 +164,8 @@ export default function Home() {
   const fieldOptions = useMemo(() => getFieldOptions(), []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const resizeRef = useRef<ResizeState | null>(null);
+  const copiedFieldRef = useRef<PdfField | null>(null);
   const msalRef = useRef<PublicClientApplication | null>(null);
 
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -131,12 +182,24 @@ export default function Home() {
   const [selectedQuick, setSelectedQuick] = useState<FieldOption | null>(null);
   const [status, setStatus] = useState("Sube un PDF para empezar.");
   const [downloadUrl, setDownloadUrl] = useState("");
+  const [editingId, setEditingId] = useState("");
+  const [copiedLabel, setCopiedLabel] = useState("");
+  const [transparentImages, setTransparentImages] = useState<TransparentImages>({
+    firma: "/firmas/firma.png",
+    huella: "/firmas/huella.png"
+  });
 
   const selectedField = fields.find((field) => field.id === selectedId);
   const pageFields = fields.filter((field) => field.pageNum === pageNum);
 
   useEffect(() => {
     setMemory(loadMemory());
+  }, []);
+
+  useEffect(() => {
+    Promise.all([makeWhiteTransparent("/firmas/firma.png"), makeWhiteTransparent("/firmas/huella.png")])
+      .then(([firma, huella]) => setTransparentImages({ firma, huella }))
+      .catch(() => setStatus("No se pudieron preparar firma/huella transparentes; se usaran las imagenes originales."));
   }, []);
 
   useEffect(() => {
@@ -170,6 +233,54 @@ export default function Home() {
       cancelled = true;
     };
   }, [pdfDoc, pageNum, zoom]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (isTypingTarget(event.target)) return;
+      if (!selectedField) {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+          event.preventDefault();
+          pasteCopiedField();
+        }
+        return;
+      }
+
+      const step = event.shiftKey ? 10 : 1;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        nudgeSelected(-step, 0);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        nudgeSelected(step, 0);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        nudgeSelected(0, -step);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        nudgeSelected(0, step);
+      } else if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        removeField(selectedField.id);
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        copySelectedField();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        pasteCopiedField();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        duplicateField(selectedField);
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        if (selectedField.tipo === "texto" || selectedField.tipo === "checkbox") {
+          setEditingId(selectedField.id);
+        }
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedField, pageNum, pageSize.width, pageSize.height]);
 
   async function loginMicrosoft() {
     const tenantId = process.env.NEXT_PUBLIC_MS_TENANT_ID || "";
@@ -215,14 +326,16 @@ export default function Home() {
     const code = detectCode(file.name);
     const known = memory?.formulariosConocidos[code];
     if (known?.fields?.length) {
-      setFields(
+      const remembered = autocompleteFields(
         known.fields.map((field) => ({
           ...field,
           id: newFieldId("mem"),
           source: "memoria",
           confianza: Math.max(field.confianza, 0.9)
-        }))
+        })),
+        contractorData
       );
+      setFields(remembered);
       setStatus(`Usando memoria local para ${code}.`);
     } else {
       setStatus(`PDF cargado. Puedes editar manualmente o analizar con IA.`);
@@ -262,12 +375,56 @@ export default function Home() {
   function removeField(id: string) {
     setFields((current) => current.filter((field) => field.id !== id));
     setSelectedId("");
+    setEditingId("");
     setDownloadUrl("");
+  }
+
+  function duplicateField(field: PdfField, dx = 14, dy = 14) {
+    const copy: PdfField = {
+      ...field,
+      id: newFieldId("copy"),
+      x: clamp(field.x + dx, 0, pageSize.width),
+      y: clamp(field.y + dy, 0, pageSize.height),
+      source: "manual",
+      confianza: Math.min(field.confianza, 0.6),
+      iaX: field.x + dx,
+      iaY: field.y + dy
+    };
+    setFields((current) => [...current, copy]);
+    setSelectedId(copy.id);
+    setEditingId("");
+    setDownloadUrl("");
+    setStatus(`Copiado: ${copy.nombre}`);
+  }
+
+  function copySelectedField() {
+    if (!selectedField) return;
+    copiedFieldRef.current = selectedField;
+    setCopiedLabel(selectedField.nombre);
+    setStatus(`Campo copiado: ${selectedField.nombre}`);
+  }
+
+  function pasteCopiedField() {
+    const copied = copiedFieldRef.current;
+    if (!copied) {
+      setStatus("No hay campo copiado.");
+      return;
+    }
+    duplicateField({ ...copied, pageNum }, 18, 18);
+  }
+
+  function nudgeSelected(dx: number, dy: number) {
+    if (!selectedField) return;
+    updateField(selectedField.id, {
+      x: clamp(selectedField.x + dx, 0, pageSize.width),
+      y: clamp(selectedField.y + dy, 0, pageSize.height)
+    });
   }
 
   function startDrag(event: React.PointerEvent<HTMLDivElement>, field: PdfField) {
     event.preventDefault();
     event.stopPropagation();
+    setEditingId("");
     setSelectedId(field.id);
     dragRef.current = {
       id: field.id,
@@ -278,6 +435,22 @@ export default function Home() {
     };
     window.addEventListener("pointermove", onDragMove);
     window.addEventListener("pointerup", stopDrag, { once: true });
+  }
+
+  function startResize(event: React.PointerEvent<HTMLButtonElement>, field: PdfField) {
+    event.preventDefault();
+    event.stopPropagation();
+    setEditingId("");
+    setSelectedId(field.id);
+    resizeRef.current = {
+      id: field.id,
+      startX: event.clientX,
+      startY: event.clientY,
+      startW: field.w,
+      startH: field.h
+    };
+    window.addEventListener("pointermove", onResizeMove);
+    window.addEventListener("pointerup", stopResize, { once: true });
   }
 
   function onDragMove(event: PointerEvent) {
@@ -291,9 +464,31 @@ export default function Home() {
     });
   }
 
+  function onResizeMove(event: PointerEvent) {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    const dx = (event.clientX - resize.startX) / zoom;
+    const dy = (event.clientY - resize.startY) / zoom;
+    const nextH = clamp(resize.startH + dy, 12, pageSize.height);
+    const resizingField = fields.find((field) => field.id === resize.id);
+    const patch: Partial<PdfField> = {
+      w: clamp(resize.startW + dx, 20, pageSize.width),
+      h: nextH
+    };
+    if (resizingField?.tipo === "texto" || resizingField?.tipo === "checkbox") {
+      patch.fontSize = clamp(Math.round(nextH * 0.48), 6, 18);
+    }
+    updateField(resize.id, patch);
+  }
+
   function stopDrag() {
     dragRef.current = null;
     window.removeEventListener("pointermove", onDragMove);
+  }
+
+  function stopResize() {
+    resizeRef.current = null;
+    window.removeEventListener("pointermove", onResizeMove);
   }
 
   async function analyzeWithAi() {
@@ -328,7 +523,8 @@ export default function Home() {
       setStatus(`IA analizo ${index + 1}/${pdfDoc.numPages} paginas...`);
     }
 
-    setFields(autocompleteFields(detected, contractorData));
+    const completedFields = autocompleteFields(detected, contractorData);
+    setFields(memory ? applyMemoryOffsets(memory, completedFields) : completedFields);
     setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
   }
 
@@ -337,8 +533,8 @@ export default function Home() {
     setStatus("Generando PDF...");
     const document = await PDFDocument.load(pdfBytes.slice(0));
     const font = await document.embedFont(StandardFonts.Helvetica);
-    const signatureBytes = await fetch("/firmas/firma.png").then((res) => res.arrayBuffer());
-    const fingerprintBytes = await fetch("/firmas/huella.png").then((res) => res.arrayBuffer());
+    const signatureBytes = await fetch(transparentImages.firma).then((res) => res.arrayBuffer());
+    const fingerprintBytes = await fetch(transparentImages.huella).then((res) => res.arrayBuffer());
     const signature = await document.embedPng(signatureBytes);
     const fingerprint = await document.embedPng(fingerprintBytes);
 
@@ -481,10 +677,42 @@ export default function Home() {
                     onDoubleClick={(event) => {
                       event.stopPropagation();
                       setSelectedId(field.id);
+                      if (field.tipo === "texto" || field.tipo === "checkbox") {
+                        setEditingId(field.id);
+                      }
                     }}
                     title={`${field.nombre} - confianza ${field.confianza.toFixed(2)}`}
                   >
-                    {field.tipo === "firma" ? <img alt="Firma" src="/firmas/firma.png" /> : field.tipo === "huella" ? <img alt="Huella" src="/firmas/huella.png" /> : field.tipo === "checkbox" ? field.valor || "X" : field.valor}
+                    {editingId === field.id && (field.tipo === "texto" || field.tipo === "checkbox") ? (
+                      <input
+                        autoFocus
+                        className="field-inline-input"
+                        value={field.valor}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onChange={(event) => updateField(field.id, { valor: event.target.value })}
+                        onBlur={() => setEditingId("")}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === "Escape") {
+                            event.preventDefault();
+                            setEditingId("");
+                          }
+                        }}
+                      />
+                    ) : field.tipo === "firma" ? (
+                      <img alt="Firma" src={transparentImages.firma} />
+                    ) : field.tipo === "huella" ? (
+                      <img alt="Huella" src={transparentImages.huella} />
+                    ) : field.tipo === "checkbox" ? (
+                      field.valor || "X"
+                    ) : (
+                      field.valor
+                    )}
+                    <button
+                      className="field-resize"
+                      type="button"
+                      aria-label="Redimensionar campo"
+                      onPointerDown={(event) => startResize(event, field)}
+                    />
                   </div>
                 ))}
               </div>
@@ -536,6 +764,22 @@ export default function Home() {
             {!selectedField && <p className="px-panel__copy">Selecciona un campo sobre el PDF.</p>}
             {selectedField && (
               <div className="px-stack px-mt-4">
+                <div className="edit-toolbar">
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={copySelectedField}>
+                    Copiar
+                  </button>
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={pasteCopiedField}>
+                    Pegar
+                  </button>
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={() => duplicateField(selectedField)}>
+                    Duplicar
+                  </button>
+                  {(selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
+                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={() => setEditingId(selectedField.id)}>
+                      Editar en PDF
+                    </button>
+                  )}
+                </div>
                 <label className="px-field">
                   <span className="px-label">Nombre</span>
                   <input className="px-input" value={selectedField.nombre} onChange={(event) => updateField(selectedField.id, { nombre: event.target.value })} />
@@ -563,6 +807,10 @@ export default function Home() {
                 </button>
               </div>
             )}
+            <p className="px-help px-mt-4">
+              Atajos: flechas mueven, Shift+flechas mueve rapido, Ctrl+C copia, Ctrl+V pega, Ctrl+D duplica, Supr elimina.
+              {copiedLabel ? ` Copiado: ${copiedLabel}.` : ""}
+            </p>
           </section>
 
           <section className="px-panel">
@@ -573,6 +821,14 @@ export default function Home() {
             <button className="px-btn px-btn--ghost px-mt-4" type="button" onClick={() => setMemory(resetMemory())}>
               Restaurar semilla
             </button>
+          </section>
+
+          <section className="px-panel">
+            <h2 className="px-panel__title">Como piensa la IA</h2>
+            <p className="px-panel__copy">
+              Mira cada pagina como imagen, busca lineas, espacios, checks, firma y huella. Luego compara el nombre del campo
+              con los datos de Provexpress, aplica memoria local y deja todo editable para que lo ajustes.
+            </p>
           </section>
         </aside>
       </section>
