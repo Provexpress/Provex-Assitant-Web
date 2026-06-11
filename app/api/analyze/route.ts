@@ -70,7 +70,20 @@ MAPEO DE CAMPOS (etiqueta visible → dato del contratista):
 - "Huella" → tipo=huella, valor=huella
 
 FORMATO NIT: XXX.XXX.XXX-X con puntos y guion.
-FORMATO FECHA: dd/mm/aaaa (colombiano).`;
+FORMATO FECHA: dd/mm/aaaa (colombiano).
+
+INSTRUCCIONES CRITICAS DE AUTORELLENO:
+- TODOS los campos de texto deben traer valor cuando exista en DATOS DEL CONTRATISTA.
+- TODOS los checkboxes deben venir decididos: "X" si aplica, "" si no aplica.
+- PROVEXPRESS SAS es proveedor/contratista y pertenece al SECTOR TRANSPORTADOR.
+- Responsable de IVA: SI. Autorretenedor: SI. Gran contribuyente: NO.
+- Es SAS / Sociedad Anonima Simplificada.
+- Regimen tributario: ORDINARIO; si el formulario dice "Comun", marcar Comun.
+- Tamano empresa: MEDIANA EMPRESA.
+- No es PEP. No opera moneda virtual, casinos, armas, joyas, remesas, zonas francas ni bienes raices.
+- Para preguntas Si/No, marca la casilla Si o No correcta, no dejes ambas indefinidas.
+- Si hay "Ciudad y Fecha" usa ciudad_fecha. Si hay solo "Fecha" usa fecha.
+- Devuelve contextoTexto/source_zone cuando puedas, para que la app pueda reforzar el mapeo.`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -110,9 +123,11 @@ ${hints}
 6. Para CHECKBOX: valor="X" solo en la opción correcta.
 7. NO repitas el mismo campo dos veces.
 8. confianza: 0.70 si ves claramente el espacio, 0.45 si es una suposición.
+9. No dejes campos vacíos si el dato existe en DATOS DEL CONTRATISTA.
+10. Para checkboxes Si/No, devuelve cada checkbox individual con nombre claro: por ejemplo "Gran contribuyente - No".
 
 RESPONDE SOLO CON JSON:
-{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.70}]}`;
+{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.70,"contextoTexto":"TERCERO A EVALUAR:"}]}`;
 
     const response = await client.chat.completions.create({
       model,

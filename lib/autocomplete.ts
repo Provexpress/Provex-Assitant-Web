@@ -1,224 +1,355 @@
 import type { ContractorData, FieldType, PdfField } from "./types";
 
-// ── Normalización ─────────────────────────────────────────────────
+type Mapping = {
+  key: string;
+  type: FieldType;
+  patterns: string[];
+};
+
+type CheckboxConcept = {
+  key: string;
+  patterns: string[];
+  mark: (data: ContractorData) => boolean;
+};
+
+export type AutocompleteSummary = {
+  total: number;
+  completed: number;
+  autoCompleted: number;
+  needsReview: number;
+  missing: number;
+  checkboxes: number;
+  images: number;
+  percent: number;
+};
+
 export function normalize(value: unknown): string {
   return String(value || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-// ── Formateo y validación de datos ───────────────────────────────
+function isYes(value: unknown): boolean {
+  return ["si", "sí", "x", "true", "1", "yes"].includes(normalize(value));
+}
 
-/** Formatea NIT colombiano → XXX.XXX.XXX-X */
+function isNo(value: unknown): boolean {
+  return ["no", "false", "0"].includes(normalize(value));
+}
+
+function hasWord(haystack: string, word: string): boolean {
+  return new RegExp(`(^|\\s)${word}(\\s|$)`).test(haystack);
+}
+
+function matchesPattern(haystack: string, pattern: string): boolean {
+  if (!haystack) return false;
+
+  if (pattern.includes(".*")) {
+    const parts = pattern.split(".*").map(normalize).filter(Boolean);
+    let from = 0;
+    for (const part of parts) {
+      const index = haystack.indexOf(part, from);
+      if (index < 0) return false;
+      from = index + part.length;
+    }
+    return true;
+  }
+
+  const needle = normalize(pattern);
+  if (!needle) return false;
+  return haystack.includes(needle) || (needle.includes(haystack) && haystack.length >= 5);
+}
+
 export function formatNit(raw: string): string {
-  const digits = raw.replace(/[^0-9]/g, "");
-  if (!digits) return raw;
+  const clean = raw.trim();
+  if (!clean) return clean;
+  if (/\d{1,3}(\.\d{3})+-\d$/u.test(clean)) return clean;
+
+  const digits = clean.replace(/[^0-9]/g, "");
+  if (digits.length < 2) return clean;
   const body = digits.slice(0, -1);
   const dv = digits.slice(-1);
-  const grouped = body.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return `${grouped}-${dv}`;
+  return `${body.replace(/\B(?=(\d{3})+(?!\d))/g, ".")}-${dv}`;
 }
 
-/** Limpia cédula / CE: solo alfanumérico con espacios */
 export function formatCC(raw: string): string {
-  return raw.replace(/[^A-Z0-9 .]/gi, "").trim();
+  return raw.replace(/[^A-Z0-9 .-]/gi, "").trim();
 }
 
-/** Solo dígitos para teléfono */
 export function formatPhone(raw: string): string {
   const digits = raw.replace(/[^0-9+]/g, "");
   return digits || raw;
 }
 
-/** Correo en minúsculas */
 export function formatEmail(raw: string): string {
   return raw.toLowerCase().trim();
 }
 
-/** Fecha colombiana dd/mm/aaaa */
 export function formatDate(raw: string): string {
-  // Si ya tiene formato dd/mm/aaaa o dd-mm-aaaa, respetar
-  if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}$/.test(raw.trim())) {
-    return raw.replace(/-/g, "/");
-  }
-  // Si tiene formato aaaa-mm-dd (ISO)
-  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const clean = raw.trim();
+  if (/^\d{2}[/-]\d{2}[/-]\d{4}$/.test(clean)) return clean.replace(/-/g, "/");
+  const iso = clean.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
-  // Devolver sin cambiar si no reconocemos
-  return raw;
+  return clean;
 }
 
-/** Valida que el correo tenga @ */
 export function isValidEmail(value: string): boolean {
   return value.includes("@") && value.includes(".");
 }
 
-/** Aplica el formateador correcto según la clave del campo */
+function contractorValue(data: ContractorData, key: string): string {
+  const aliases: Record<string, string[]> = {
+    documento_identidad: ["documento_identidad", "cc", "cedula"],
+    correo_contacto: ["correo_contacto", "correo", "email"],
+    fecha: ["fecha", "fecha_hoy"],
+    ciudad_fecha: ["ciudad_fecha", "ciudad_y_fecha"],
+    telefono: ["telefono", "telefono_contacto"]
+  };
+
+  const keys = aliases[key] || [key];
+  for (const candidate of keys) {
+    const value = String(data[candidate] || "").trim();
+    if (value) return applyFormat(key, value);
+  }
+  return "";
+}
+
 function applyFormat(key: string, value: string): string {
   if (!value || value === "[SIN DATO]") return value;
   if (key === "nit") return formatNit(value);
   if (key === "documento_identidad" || key === "cc") return formatCC(value);
   if (key === "telefono" || key === "celular") return formatPhone(value);
   if (key === "correo_contacto" || key === "correo" || key === "email") return formatEmail(value);
-  if (key === "fecha" || key === "fecha_hoy" || key === "ciudad_fecha" || key === "ciudad_y_fecha") {
-    return formatDate(value);
-  }
+  if (key === "fecha" || key === "fecha_hoy") return formatDate(value);
   return value;
 }
 
-// ── Mapa de aliases ───────────────────────────────────────────────
-/**
- * Cada entrada: [[aliases...], clave_contratista, tipo]
- * Orden de importancia: los más específicos primero.
- */
-const intelligentMap: Array<[string[], string, FieldType]> = [
-  // ── Fecha y ciudad/fecha ──────────────────────────────────────
-  [
-    [
-      "ciudad y fecha", "ciudad y fecha:", "lugar y fecha", "lugar y fecha:",
-      "ciudad, fecha", "fecha y ciudad", "en la ciudad"
-    ],
-    "ciudad_fecha", "texto"
-  ],
-  [
-    [
-      "fecha de diligenciamiento", "fecha registro", "fecha de registro",
-      "fecha de suscripcion", "fecha expedicion", "fecha:",
-      "fecha de", "a los dias del mes de", "fecha"
-    ],
-    "fecha", "texto"
-  ],
-
-  // ── Razón social ──────────────────────────────────────────────
-  [
-    [
-      "tercero a evaluar", "razon social", "razon o denominacion social",
-      "denominacion social", "nombre de la empresa", "nombre empresa",
-      "en representacion de", "actuando en nombre de", "nombre o razon",
-      "nombre del proveedor", "proveedor", "empresa", "tercero", "entidad"
-    ],
-    "razon_social", "texto"
-  ],
-
-  // ── NIT ───────────────────────────────────────────────────────
-  [
-    [
-      "n.i.t.", "n.i.t", "nit no", "nit:", "nit ",
-      "identificacion tributaria", "identificada con nit",
-      "identificado con nit", "numero de nit", "con nit", "rut", "nit"
-    ],
-    "nit", "texto"
-  ],
-
-  // ── Representante legal ───────────────────────────────────────
-  [
-    [
-      "representante legal", "rep. legal", "rep legal",
-      "nombre del representante", "nombre de quien diligencia",
-      "quien suscribe", "el suscrito", "yo,", "suscrito",
-      "nombres y apellidos", "nombre completo del", "nombre completo",
-      "nombre:", "nombre del titular"
-    ],
-    "representante_legal", "texto"
-  ],
-
-  // ── Documento de identidad ────────────────────────────────────
-  [
-    [
-      "cedula de ciudadania", "cedula de ciudadanía", "c.c.:", "c.c:",
-      "portador de la cedula", "identificado con cedula",
-      "identificado con cc", "identificada con cc",
-      "identificado con c.c", "numero de cedula",
-      "documento de identidad", "documento identidad",
-      "cedula", "c.c", "cc.", "cc "
-    ],
-    "documento_identidad", "texto"
-  ],
-
-  // ── Dirección ─────────────────────────────────────────────────
-  [
-    [
-      "direccion principal", "direccion de correspondencia",
-      "domicilio principal", "sede principal", "ubicada en",
-      "con domicilio en", "domicilio", "direccion"
-    ],
-    "direccion", "texto"
-  ],
-
-  // ── Ciudad ────────────────────────────────────────────────────
-  [["ciudad:", "municipio", "ciudad"], "ciudad", "texto"],
-
-  // ── Departamento ─────────────────────────────────────────────
-  [["departamento:", "departamento"], "departamento", "texto"],
-
-  // ── País ─────────────────────────────────────────────────────
-  [["pais:", "pais"], "pais", "texto"],
-
-  // ── Teléfono ─────────────────────────────────────────────────
-  [
-    ["telefono principal", "pbx", "fax", "telefono:", "tel.:", "tel:", "tel ", "telefono"],
-    "telefono", "texto"
-  ],
-
-  // ── Celular ───────────────────────────────────────────────────
-  [["celular:", "movil:", "celular", "movil"], "celular", "texto"],
-
-  // ── Correo ────────────────────────────────────────────────────
-  [
-    [
-      "correo electronico", "correo electrónico", "e-mail:", "email:",
-      "correo:", "correo"
-    ],
-    "correo_contacto", "texto"
-  ],
-
-  // ── Actividad económica ───────────────────────────────────────
-  [["actividad economica", "codigo ciiu", "ciiu", "actividad principal"], "actividad_economica", "texto"],
-
-  // ── Régimen tributario ────────────────────────────────────────
-  [["regimen tributario", "regimen:", "regimen"], "regimen_tributario", "texto"],
-
-  // ── Responsable IVA ──────────────────────────────────────────
-  [["responsable de iva", "responsable iva"], "responsable_iva", "texto"],
-
-  // ── Gran contribuyente ────────────────────────────────────────
-  [["gran contribuyente"], "gran_contribuyente", "texto"],
-
-  // ── Autorretenedor ────────────────────────────────────────────
-  [["autorretenedor renta", "autorretenedor"], "autorretenedor_renta", "texto"],
-
-  // ── Tamaño empresa ────────────────────────────────────────────
-  [["tamano empresa", "tipo empresa", "clasificacion empresa", "tamano de empresa"], "tamano_empresa", "texto"],
-
-  // ── Firma ─────────────────────────────────────────────────────
-  [["firma digital", "firma autorizada", "firma:", "firma"], "firma", "firma"],
-
-  // ── Huella ────────────────────────────────────────────────────
-  [["huella dactilar", "huella digital", "huella:", "huella"], "huella", "huella"]
+const FIELD_MAPPINGS: Mapping[] = [
+  {
+    key: "ciudad_fecha",
+    type: "texto",
+    patterns: ["ciudad y fecha", "ciudad fecha", "lugar y fecha", "lugar fecha", "fecha y ciudad"]
+  },
+  {
+    key: "fecha",
+    type: "texto",
+    patterns: [
+      "fecha",
+      "fecha registro",
+      "fecha de registro",
+      "fecha diligenciamiento",
+      "fecha del formulario",
+      "fecha radicacion",
+      "fecha de radicacion",
+      "fecha de suscripcion",
+      "fecha expedicion",
+      "a los dias del mes"
+    ]
+  },
+  {
+    key: "razon_social",
+    type: "texto",
+    patterns: [
+      "razon social",
+      "razon o denominacion social",
+      "empresa",
+      "nombre empresa",
+      "nombre de la empresa",
+      "denominacion social",
+      "tercero a evaluar",
+      "tercero",
+      "contratista",
+      "nombre o razon",
+      "obrando en representacion de",
+      "en representacion de",
+      "de la empresa",
+      "proveedor",
+      "proveedor de servicios",
+      "nombre del contratista",
+      "nombre del tercero",
+      "entidad"
+    ]
+  },
+  {
+    key: "nit",
+    type: "texto",
+    patterns: [
+      "nit",
+      "n i t",
+      "nit no",
+      "identificacion tributaria",
+      "identificada con nit",
+      "identificado con nit",
+      "numero de nit",
+      "numero de identificacion tributaria",
+      "id tributaria",
+      "rut"
+    ]
+  },
+  {
+    key: "representante_legal",
+    type: "texto",
+    patterns: [
+      "representante legal",
+      "rep legal",
+      "representante",
+      "nombre del representante",
+      "yo",
+      "el abajo firmante",
+      "nombre de quien diligencia",
+      "nombre funcionario",
+      "nombre completo",
+      "nombres y apellidos",
+      "suscrito",
+      "firmante",
+      "otorgante",
+      "apoderado",
+      "quien suscribe"
+    ]
+  },
+  {
+    key: "documento_identidad",
+    type: "texto",
+    patterns: [
+      "cedula",
+      "c c",
+      "cc",
+      "documento identidad",
+      "documento de identidad",
+      "no identificacion",
+      "identificado con",
+      "identificada con",
+      "numero documento",
+      "doc identidad",
+      "cedula de ciudadania",
+      "no cedula",
+      "cedula no"
+    ]
+  },
+  {
+    key: "direccion",
+    type: "texto",
+    patterns: [
+      "direccion",
+      "direccion comercial",
+      "domicilio",
+      "direccion principal",
+      "direccion de correspondencia",
+      "sede principal",
+      "ubicacion",
+      "ubicada en",
+      "con domicilio en"
+    ]
+  },
+  { key: "ciudad", type: "texto", patterns: ["ciudad domicilio", "ciudad", "municipio"] },
+  { key: "departamento", type: "texto", patterns: ["departamento", "provincia", "estado"] },
+  { key: "pais", type: "texto", patterns: ["pais", "nacionalidad"] },
+  {
+    key: "telefono",
+    type: "texto",
+    patterns: [
+      "telefono",
+      "telefono fijo",
+      "telefono principal",
+      "numero telefonico",
+      "tel",
+      "pbx",
+      "fax"
+    ]
+  },
+  { key: "celular", type: "texto", patterns: ["celular", "movil", "telefono celular", "numero celular", "cel"] },
+  {
+    key: "correo_contacto",
+    type: "texto",
+    patterns: [
+      "correo",
+      "correo electronico",
+      "email",
+      "e mail",
+      "e-mail",
+      "direccion electronica"
+    ]
+  },
+  {
+    key: "actividad_economica",
+    type: "texto",
+    patterns: ["actividad economica", "ciiu", "codigo ciiu", "actividad principal", "actividad comercial"]
+  },
+  {
+    key: "regimen_tributario",
+    type: "texto",
+    patterns: ["regimen", "regimen tributario", "tipo regimen"]
+  },
+  { key: "responsable_iva", type: "texto", patterns: ["responsable iva", "responsable de iva"] },
+  { key: "gran_contribuyente", type: "texto", patterns: ["gran contribuyente"] },
+  { key: "autorretenedor_renta", type: "texto", patterns: ["autorretenedor renta", "autorretenedor", "retencion fuente"] },
+  {
+    key: "tamano_empresa",
+    type: "texto",
+    patterns: ["tamano empresa", "tamano de empresa", "tipo empresa", "clasificacion empresa", "mediana empresa"]
+  },
+  { key: "firma", type: "firma", patterns: ["firma digital", "firma autorizada", "firma representante", "firma"] },
+  { key: "huella", type: "huella", patterns: ["huella dactilar", "huella digital", "huella"] }
 ];
 
-// ── Motor de mapeo ────────────────────────────────────────────────
+const CHECKBOX_CONCEPTS: CheckboxConcept[] = [
+  { key: "proveedor", patterns: ["proveedor", "proveedor bienes", "proveedor servicios"], mark: () => true },
+  { key: "cliente", patterns: ["cliente"], mark: () => false },
+  { key: "responsable_iva", patterns: ["responsable iva", "responsable de iva", "responsable del impuesto"], mark: (d) => isYes(d.responsable_iva) },
+  { key: "gran_contribuyente", patterns: ["gran contribuyente"], mark: (d) => isYes(d.gran_contribuyente) },
+  { key: "autorretenedor_renta", patterns: ["autorretenedor", "retencion fuente", "retenedor"], mark: (d) => isYes(d.autorretenedor_renta) },
+  { key: "sas", patterns: ["sociedad anonima simplificada", "s a s", "sas"], mark: () => true },
+  { key: "regimen_comun", patterns: ["regimen comun", "comun"], mark: (d) => ["ordinario", "comun"].includes(normalize(d.regimen_tributario)) },
+  { key: "regimen_simplificado", patterns: ["regimen simplificado", "simplificado"], mark: () => false },
+  { key: "mediana", patterns: ["mediana"], mark: (d) => normalize(d.tamano_empresa).includes("mediana") },
+  { key: "corporacion_sin_animo", patterns: ["corporacion", "fundacion", "sin animo de lucro", "entidad sin animo"], mark: () => false },
+  { key: "pep", patterns: ["persona publicamente expuesta", "publicamente expuesta", "pep"], mark: () => false },
+  { key: "moneda_virtual", patterns: ["moneda virtual", "criptoactivo", "criptomoneda"], mark: () => false },
+  { key: "casas_cambio", patterns: ["casas de cambio"], mark: () => false },
+  { key: "casas_empeno", patterns: ["casas de empeno"], mark: () => false },
+  { key: "casinos", patterns: ["casinos", "apuestas", "juegos de azar"], mark: () => false },
+  { key: "vehiculos", patterns: ["vehiculos", "embarcaciones"], mark: () => false },
+  { key: "multinivel", patterns: ["multinivel", "piramidal"], mark: () => false },
+  { key: "armas", patterns: ["armas", "explosivos", "municiones"], mark: () => false },
+  { key: "constructoras", patterns: ["constructoras", "construccion"], mark: () => false },
+  { key: "bienes_raices", patterns: ["bienes raices", "inmobiliaria"], mark: () => false },
+  { key: "deportivas", patterns: ["deportivas", "club deportivo"], mark: () => false },
+  { key: "gasolina", patterns: ["gasolina", "estaciones de servicio"], mark: () => false },
+  { key: "joyas", patterns: ["joyas", "piedras preciosas", "metales preciosos"], mark: () => false },
+  { key: "prestamistas", patterns: ["prestamistas", "prestamos"], mark: () => false },
+  { key: "transportador", patterns: ["sector transportador", "transportador", "transporte de carga"], mark: () => true },
+  { key: "dinero_valores", patterns: ["dinero", "valores"], mark: () => false },
+  { key: "zonas_francas", patterns: ["zonas francas"], mark: () => false },
+  { key: "fondos_remesas", patterns: ["fondos", "remesas"], mark: () => false },
+  { key: "cambiarios", patterns: ["cambiarios", "fronterizos"], mark: () => false },
+  { key: "moneda_extranjera", patterns: ["moneda extranjera"], mark: () => false },
+  { key: "productos_exterior", patterns: ["productos.*exterior", "operaciones.*exterior"], mark: () => false },
+  { key: "cuentas_exterior", patterns: ["cuentas.*exterior"], mark: () => false },
+  { key: "obligado_declarar_renta", patterns: ["obligado.*declarar.*renta", "declarante.*renta"], mark: () => true },
+  { key: "cuenta_corriente", patterns: ["cuenta corriente", "corriente"], mark: () => true },
+  { key: "cuenta_ahorros", patterns: ["cuenta ahorros", "ahorros"], mark: () => false },
+  { key: "inscripcion", patterns: ["inscripcion"], mark: () => true },
+  { key: "actualizacion", patterns: ["actualizacion"], mark: () => false }
+];
 
-export function matchField(name: string): { key: string; type: FieldType } | null {
-  const normalized = normalize(name);
+function fieldHaystack(field: PdfField): string {
+  return normalize([field.nombre, field.contextoTexto, field.campoCsv].filter(Boolean).join(" "));
+}
+
+export function matchField(name: string, context = ""): { key: string; type: FieldType } | null {
+  const haystack = normalize(`${name} ${context}`);
   let best: { key: string; type: FieldType; score: number } | null = null;
 
-  for (const [patterns, key, type] of intelligentMap) {
-    for (const pattern of patterns) {
-      const needle = normalize(pattern);
-      if (!needle) continue;
-
-      // Coincidencia exacta tiene prioridad máxima
-      if (normalized === needle) {
-        return { key, type };
-      }
-
-      // Coincidencia por inclusión: preferir la más larga (más específica)
-      if (normalized.includes(needle) && (!best || needle.length > best.score)) {
-        best = { key, type, score: needle.length };
+  for (const mapping of FIELD_MAPPINGS) {
+    for (const pattern of mapping.patterns) {
+      if (!matchesPattern(haystack, pattern)) continue;
+      const score = normalize(pattern).length;
+      if (!best || score > best.score) {
+        best = { key: mapping.key, type: mapping.type, score };
       }
     }
   }
@@ -226,107 +357,170 @@ export function matchField(name: string): { key: string; type: FieldType } | nul
   return best ? { key: best.key, type: best.type } : null;
 }
 
-// ── Autocompletado individual ─────────────────────────────────────
+function checkboxOption(haystack: string): "si" | "no" | "" {
+  if (hasWord(haystack, "si") || hasWord(haystack, "yes")) return "si";
+  if (hasWord(haystack, "no")) return "no";
+  return "";
+}
+
+function resolveCheckbox(field: PdfField, contractorData: ContractorData): { value: string; key: string } | null {
+  const haystack = fieldHaystack(field);
+  const option = checkboxOption(haystack);
+
+  let best: { concept: CheckboxConcept; score: number } | null = null;
+  for (const concept of CHECKBOX_CONCEPTS) {
+    for (const pattern of concept.patterns) {
+      if (!matchesPattern(haystack, pattern)) continue;
+      const score = normalize(pattern).length;
+      if (!best || score > best.score) best = { concept, score };
+    }
+  }
+
+  if (!best) return null;
+
+  const expected = best.concept.mark(contractorData);
+  const shouldMark = option === "si" ? expected : option === "no" ? !expected : expected;
+  return { value: shouldMark ? "X" : "", key: best.concept.key };
+}
 
 export function autocompleteField(field: PdfField, contractorData: ContractorData): PdfField {
-  const match = matchField(field.nombre);
+  const haystack = fieldHaystack(field);
 
+  if (field.tipo === "firma" || matchesPattern(haystack, "firma")) {
+    return {
+      ...field,
+      tipo: "firma",
+      valor: "firma",
+      campoCsv: "firma",
+      source: field.source === "memoria" ? "memoria" : "auto",
+      confianza: Math.max(field.confianza || 0, 0.9)
+    };
+  }
+
+  if (field.tipo === "huella" || matchesPattern(haystack, "huella")) {
+    return {
+      ...field,
+      tipo: "huella",
+      valor: "huella",
+      campoCsv: "huella",
+      source: field.source === "memoria" ? "memoria" : "auto",
+      confianza: Math.max(field.confianza || 0, 0.9)
+    };
+  }
+
+  if (field.tipo === "checkbox") {
+    const resolved = resolveCheckbox(field, contractorData);
+    if (!resolved) {
+      return {
+        ...field,
+        valor: field.valor === "X" ? "X" : "",
+        confianza: field.valor === "X" ? Math.max(field.confianza, 0.6) : field.confianza
+      };
+    }
+
+    return {
+      ...field,
+      valor: resolved.value,
+      campoCsv: resolved.key,
+      source: field.source === "memoria" ? "memoria" : "auto_checkbox",
+      confianza: Math.max(field.confianza || 0, 0.85)
+    };
+  }
+
+  const match = matchField(field.nombre, field.contextoTexto || "");
   if (!match) {
-    // Si ya tiene valor, dejarlo; si no, marcarlo vacío pero no con texto inventado
     return field;
   }
 
   if (match.type === "firma" || match.type === "huella") {
-    return { ...field, tipo: match.type, valor: match.type, campoCsv: match.key };
+    return {
+      ...field,
+      tipo: match.type,
+      valor: match.type,
+      campoCsv: match.key,
+      source: field.source === "memoria" ? "memoria" : "auto",
+      confianza: Math.max(field.confianza || 0, 0.9)
+    };
   }
 
-  if (field.tipo === "checkbox") {
-    const value = normalize(contractorData[match.key] || "");
-    const fieldName = normalize(field.nombre);
-    // Marcar si el valor del contratista es "si"/"x" o si el campo dice "no" y el valor es "no"
-    const checked =
-      value === "si" || value === "x" || value === "true" ||
-      (fieldName.includes("no") && (value === "no" || value === "false"));
-    return { ...field, valor: checked ? "X" : "", campoCsv: match.key };
+  const value = contractorValue(contractorData, match.key);
+  if (!value) {
+    return {
+      ...field,
+      campoCsv: match.key,
+      confianza: Math.max(0.35, field.confianza || 0)
+    };
   }
-
-  const rawValue = contractorData[match.key] || "";
-  if (!rawValue) return field; // No sobrescribir con vacío
-
-  const formattedValue = applyFormat(match.key, rawValue);
-
-  // Nivel de confianza: si el campo ya tenía valor de la IA, combinar;
-  // si viene de zona detectada (confianza >= 0.6), subir ligeramente
-  const newConfianza = Math.min(0.99, field.confianza + 0.05);
 
   return {
     ...field,
     tipo: "texto",
-    valor: formattedValue,
+    valor: value,
     campoCsv: match.key,
-    confianza: newConfianza
+    source: field.source === "memoria" ? "memoria" : "auto",
+    confianza: Math.max(field.confianza || 0, 0.82)
   };
 }
-
-// ── Autocompletado masivo ─────────────────────────────────────────
 
 export function autocompleteFields(fields: PdfField[], contractorData: ContractorData): PdfField[] {
   return fields.map((field) => autocompleteField(field, contractorData));
 }
 
-// ── Deduplicación robusta ─────────────────────────────────────────
-
-/**
- * Elimina campos duplicados basándose en:
- * 1. Misma página + posición cercana (±12 pts) + mismo tipo → mantener mayor confianza
- * 2. Misma página + nombre normalizado idéntico → mantener mayor confianza
- */
 export function deduplicateFields(fields: PdfField[]): PdfField[] {
   const result: PdfField[] = [];
 
   for (const field of fields) {
-    const normalizedName = normalize(field.nombre);
-
-    // Buscar si ya existe uno solapado
     const existingIndex = result.findIndex((existing) => {
-      if (existing.pageNum !== field.pageNum) return false;
+      if (existing.pageNum !== field.pageNum || existing.tipo !== field.tipo) return false;
 
-      // Duplicado por nombre normalizado
-      if (normalize(existing.nombre) === normalizedName && normalizedName.length > 2) {
-        return true;
-      }
+      const close = Math.abs(existing.x - field.x) <= 10 && Math.abs(existing.y - field.y) <= 10;
+      if (close) return true;
 
-      // Duplicado por posición cercana + mismo tipo
-      const dx = Math.abs(existing.x - field.x);
-      const dy = Math.abs(existing.y - field.y);
-      if (dx <= 12 && dy <= 12 && existing.tipo === field.tipo) {
-        return true;
-      }
+      const sameSemanticField =
+        Boolean(existing.campoCsv && field.campoCsv && existing.campoCsv === field.campoCsv) ||
+        normalize(existing.nombre) === normalize(field.nombre);
 
-      return false;
+      return sameSemanticField && Math.abs(existing.x - field.x) <= 16 && Math.abs(existing.y - field.y) <= 16;
     });
 
     if (existingIndex === -1) {
       result.push(field);
-    } else {
-      // Mantener el de mayor confianza
-      if (field.confianza > result[existingIndex].confianza) {
-        result[existingIndex] = field;
-      }
+    } else if ((field.confianza || 0) > (result[existingIndex].confianza || 0)) {
+      result[existingIndex] = field;
     }
   }
 
   return result;
 }
 
-/**
- * Determina si un campo debe mostrarse vacío al usuario (confianza baja)
- * o si puede rellenarse automáticamente.
- *
- * confianza >= 0.8 → relleno automático, borde verde
- * 0.5 <= confianza < 0.8 → relleno pero marcado amarillo (ya lo hace el CSS)
- * confianza < 0.5 → dejarlo vacío si no tiene valor
- */
+function fieldHasFinalValue(field: PdfField): boolean {
+  if (field.tipo === "firma" || field.tipo === "huella") return true;
+  if (field.tipo === "checkbox") return field.source === "auto_checkbox" || field.valor === "X";
+  const value = normalize(field.valor);
+  return Boolean(value && value !== "sin dato");
+}
+
+export function summarizeAutocomplete(fields: PdfField[]): AutocompleteSummary {
+  const total = fields.length;
+  const autoCompleted = fields.filter((field) => field.source === "auto" || field.source === "auto_checkbox" || field.source === "memoria").length;
+  const completed = fields.filter(fieldHasFinalValue).length;
+  const missing = fields.filter((field) => field.tipo === "texto" && !fieldHasFinalValue(field)).length;
+  const needsReview = fields.filter((field) => field.confianza < 0.8 || (field.tipo === "texto" && !fieldHasFinalValue(field))).length;
+  const checkboxes = fields.filter((field) => field.tipo === "checkbox" && (field.source === "auto_checkbox" || field.valor === "X")).length;
+  const images = fields.filter((field) => field.tipo === "firma" || field.tipo === "huella").length;
+
+  return {
+    total,
+    completed,
+    autoCompleted,
+    needsReview,
+    missing,
+    checkboxes,
+    images,
+    percent: total ? Math.round((completed / total) * 100) : 0
+  };
+}
+
 export function shouldAutoFill(field: PdfField): boolean {
-  return field.confianza >= 0.5 && Boolean(field.valor);
+  return field.confianza >= 0.5 && fieldHasFinalValue(field);
 }

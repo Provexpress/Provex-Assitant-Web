@@ -82,6 +82,7 @@ body {
 .stat-icon--green { background: rgba(22,163,74,0.1); }
 .stat-icon--purple { background: rgba(106,63,160,0.1); }
 .stat-icon--amber { background: rgba(217,119,6,0.1); }
+.stat-icon--red { background: rgba(198,40,40,0.1); }
 
 .stat-info { min-width: 0; }
 

@@ -70,7 +70,20 @@ MAPEO DE CAMPOS (aliases → dato del contratista):
 - "Huella" → tipo huella
 
 FORMATO DE FECHA: usa siempre dd/mm/aaaa (formato colombiano).
-FORMATO NIT: usa XXX.XXX.XXX-X con puntos y guion.`;
+FORMATO NIT: usa XXX.XXX.XXX-X con puntos y guion.
+
+INSTRUCCIONES CRITICAS DE AUTORELLENO:
+- TODOS los campos de texto deben traer valor cuando exista en DATOS DEL CONTRATISTA.
+- TODOS los checkboxes deben venir decididos: "X" si aplica, "" si no aplica.
+- PROVEXPRESS SAS es proveedor/contratista y pertenece al SECTOR TRANSPORTADOR.
+- Responsable de IVA: SI. Autorretenedor: SI. Gran contribuyente: NO.
+- Es SAS / Sociedad Anonima Simplificada.
+- Regimen tributario: ORDINARIO; si el formulario dice "Comun", marcar Comun.
+- Tamano empresa: MEDIANA EMPRESA.
+- No es PEP. No opera moneda virtual, casinos, armas, joyas, remesas, zonas francas ni bienes raices.
+- Para preguntas Si/No, marca la casilla Si o No correcta, no dejes ambas indefinidas.
+- Si hay "Ciudad y Fecha" usa ciudad_fecha. Si hay solo "Fecha" usa fecha.
+- Devuelve contextoTexto/source_zone cuando puedas, para que la app pueda reforzar el mapeo.`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -109,9 +122,11 @@ ${hints}
 5. Para CHECKBOX: valor="X" solo en la opción correcta según datos del contratista.
 6. NO repitas el mismo campo dos veces.
 7. Si una zona no tiene dato correspondiente en el contratista, omítela.
+8. No dejes campos vacíos si el dato existe en DATOS DEL CONTRATISTA.
+9. Para checkboxes Si/No, devuelve cada checkbox individual con nombre claro: por ejemplo "Responsable IVA - Si".
 
 RESPONDE SOLO CON JSON:
-{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":217,"y":124,"w":160,"h":18,"tipo":"texto","fontsize":9,"confianza":0.90,"source_zone":"after_label:TERCERO A EVALUAR:"}]}`;
+{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":217,"y":124,"w":160,"h":18,"tipo":"texto","fontsize":9,"confianza":0.90,"source_zone":"after_label:TERCERO A EVALUAR:","contextoTexto":"TERCERO A EVALUAR:"}]}`;
 
     const response = await client.chat.completions.create({
       model,

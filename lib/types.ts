@@ -14,7 +14,7 @@ export type PdfField = {
   h: number;
   fontSize: number;
   confianza: number;
-  source: "ia" | "memoria" | "manual";
+  source: "ia" | "memoria" | "manual" | "auto" | "auto_checkbox";
   campoCsv?: string;
   iaX?: number;
   iaY?: number;

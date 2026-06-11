@@ -3,7 +3,7 @@
 import { PublicClientApplication, type AccountInfo } from "@azure/msal-browser";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { autocompleteFields, deduplicateFields } from "../lib/autocomplete";
+import { autocompleteFields, deduplicateFields, summarizeAutocomplete } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
 import { applyMemoryOffsets, detectCode, isLearned, learnFromConfirmation, loadMemory, memoryHints, resetMemory, trainFromFilledPdf } from "../lib/memory";
 import { extractPageStructure, type PageStructure } from "../lib/pdfTextExtract";
@@ -220,7 +220,8 @@ function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: 
     iaY: y,
     suggestedX: x,
     suggestedY: y,
-    manualSize: false
+    manualSize: false,
+    contextoTexto: String(raw.contextoTexto || raw.context || raw.source_zone || raw.labelContext || "")
   };
 }
 
@@ -530,15 +531,16 @@ export default function Home() {
         contractorData
       );
       const deduped = deduplicateFields(autoSizeFields(remembered, firstViewport.width));
+      const summary = summarizeAutocomplete(deduped);
       setFields(deduped);
 
       // Si el formulario está aprendido (3+ veces sin correcciones), no llamar IA
       if (isLearned(activeMemory, knownKey)) {
-        setStatus(`🤓 Formulario aprendido — ${deduped.length} campos cargados desde memoria. Sin llamada a IA.`);
-        addToast(`🤓 Formulario aprendido — sin IA (${deduped.length} campos)`, "success");
+        setStatus(`🤓 Formulario aprendido — ${summary.completed}/${summary.total} campos listos (${summary.percent}%). Sin llamada a IA.`);
+        addToast(`🤓 Formulario aprendido — ${summary.completed}/${summary.total} listos`, "success");
       } else {
-        setStatus(`Usando memoria para ${knownKey}. ${deduped.length} campos cargados.`);
-        addToast(`🧠 Memoria cargada — ${deduped.length} campos`, "success");
+        setStatus(`Usando memoria para ${knownKey}. ${summary.completed}/${summary.total} campos listos (${summary.percent}%).`);
+        addToast(`🧠 Memoria cargada — ${summary.completed}/${summary.total} listos`, "success");
       }
     } else {
       setStatus("PDF cargado. Analizando automáticamente con IA...");
@@ -820,11 +822,12 @@ export default function Home() {
       const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
       // Deduplicar antes de mostrar
       const deduped = deduplicateFields(autoSizeFields(adjustedFields, pageSize.width));
+      const summary = summarizeAutocomplete(deduped);
       const removedCount = adjustedFields.length - deduped.length;
       setFields(deduped);
       const dedupeMsg = removedCount > 0 ? ` (${removedCount} duplicados eliminados)` : "";
-      setStatus(`IA detectó ${deduped.length} campos${dedupeMsg}. Ajústalos sobre el PDF.`);
-      addToast(`🤖 IA detectó ${deduped.length} campos${dedupeMsg}`, "success");
+      setStatus(`IA detectó ${summary.total} campos${dedupeMsg}. Auto-completó ${summary.completed}/${summary.total} (${summary.percent}%). Revisa ${summary.needsReview}.`);
+      addToast(`🤖 Auto-completó ${summary.completed}/${summary.total} campos`, "success");
     } finally {
       setIsAnalyzing(false);
     }
@@ -968,6 +971,7 @@ export default function Home() {
   const avgConfidence = fields.length > 0
     ? Math.round((fields.reduce((sum, f) => sum + f.confianza, 0) / fields.length) * 100)
     : 0;
+  const completionSummary = summarizeAutocomplete(fields);
 
   const statusInfo = getStatusInfo(status);
 
@@ -1003,7 +1007,7 @@ export default function Home() {
               <p className="px-copy">Rellena formularios automáticamente, revisa en el PDF y descarga el archivo listo en segundos.</p>
             </div>
             <div className="px-feature-list">
-              <div className="px-feature"><span className="px-dot" /> Análisis automático con IA Gemini</div>
+              <div className="px-feature"><span className="px-dot" /> Análisis automático con Azure OpenAI</div>
               <div className="px-feature"><span className="px-dot px-dot--purple" /> Memoria local sin base de datos</div>
               <div className="px-feature"><span className="px-dot" /> Login seguro con Microsoft 365</div>
             </div>
@@ -1071,22 +1075,29 @@ export default function Home() {
           <div className="stat-card">
             <div className="stat-icon stat-icon--green">🔍</div>
             <div className="stat-info">
-              <span className="stat-value">{fields.length}</span>
-              <span className="stat-label">Campos detectados</span>
+              <span className="stat-value">{completionSummary.completed}/{completionSummary.total}</span>
+              <span className="stat-label">Auto-completados</span>
             </div>
           </div>
           <div className="stat-card">
             <div className="stat-icon stat-icon--purple">🎯</div>
             <div className="stat-info">
-              <span className="stat-value">{avgConfidence}%</span>
-              <span className="stat-label">Confianza promedio</span>
+              <span className="stat-value">{completionSummary.needsReview}</span>
+              <span className="stat-label">Por revisar</span>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-icon--red">⛔</div>
+            <div className="stat-info">
+              <span className="stat-value">{completionSummary.missing}</span>
+              <span className="stat-label">Sin dato</span>
             </div>
           </div>
           <div className="stat-card">
             <div className="stat-icon stat-icon--amber">🧠</div>
             <div className="stat-info">
-              <span className="stat-value">{memory ? Object.keys(memory.formulariosConocidos).length : 0}</span>
-              <span className="stat-label">En memoria</span>
+              <span className="stat-value">{avgConfidence}%</span>
+              <span className="stat-label">Confianza</span>
             </div>
           </div>
         </div>
