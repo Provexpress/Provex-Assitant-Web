@@ -20,6 +20,7 @@ export type PdfField = {
   iaY?: number;
   suggestedX?: number;
   suggestedY?: number;
+  manualSize?: boolean;
 };
 
 export type FieldOption = {

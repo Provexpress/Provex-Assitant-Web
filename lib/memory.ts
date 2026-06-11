@@ -34,7 +34,8 @@ function legacyToLocalMemory(): LocalMemory {
           iaX: Number(field.x || 0),
           iaY: Number(field.y || 0),
           suggestedX: Number(field.x || 0),
-          suggestedY: Number(field.y || 0)
+          suggestedY: Number(field.y || 0),
+          manualSize: Boolean(field.manualSize)
         });
       }
     }

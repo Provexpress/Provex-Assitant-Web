@@ -87,11 +87,72 @@ function newFieldId(prefix = "field") {
 function defaultSize(type: FieldType) {
   if (type === "firma") return { w: 120, h: 44 };
   if (type === "huella") return { w: 70, h: 92 };
-  return { w: 150, h: 24 };
+  if (type === "checkbox") return { w: 20, h: 20 };
+  return { w: 96, h: 20 };
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+let measureContext: CanvasRenderingContext2D | null = null;
+
+function getMeasureContext() {
+  if (typeof document === "undefined") return null;
+  if (!measureContext) {
+    measureContext = document.createElement("canvas").getContext("2d");
+  }
+  return measureContext;
+}
+
+function fieldTextForSize(field: PdfField) {
+  if (field.tipo === "checkbox") return field.valor || "X";
+  if (field.tipo === "firma") return "Firma";
+  if (field.tipo === "huella") return "Huella";
+  return field.valor?.trim() || field.nombre?.trim() || "Campo";
+}
+
+function estimateFieldSize(field: PdfField, pageWidth = 595) {
+  if (field.tipo === "firma" || field.tipo === "huella") return { w: field.w, h: field.h };
+
+  const fontSize = clamp(Number(field.fontSize || 9), 6, 18);
+  if (field.tipo === "checkbox") {
+    const side = Math.max(16, Math.round(fontSize * 1.35));
+    return { w: side, h: side };
+  }
+
+  const text = fieldTextForSize(field);
+  const minWidth = Math.max(34, Math.round(fontSize * 2.3));
+  const availableWidth = Math.max(minWidth, Math.floor(pageWidth - Number(field.x || 0) - 16));
+  const context = getMeasureContext();
+  let width = Math.ceil(text.length * fontSize * 0.58 + fontSize * 1.2);
+
+  if (context) {
+    context.font = `${Math.max(7, fontSize)}px Helvetica, Arial, sans-serif`;
+    width = Math.ceil(context.measureText(text).width + Math.max(8, fontSize));
+  }
+
+  return {
+    w: clamp(width, minWidth, availableWidth),
+    h: clamp(Math.max(15, Math.round(fontSize * 1.5)), 15, 30)
+  };
+}
+
+function autoSizeField(field: PdfField, pageWidth = 595, force = false): PdfField {
+  if ((field.tipo !== "texto" && field.tipo !== "checkbox") || (!force && field.manualSize)) {
+    return field;
+  }
+
+  const size = estimateFieldSize(field, pageWidth);
+  return {
+    ...field,
+    w: size.w,
+    h: size.h
+  };
+}
+
+function autoSizeFields(fields: PdfField[], pageWidth = 595) {
+  return fields.map((field) => autoSizeField(field, pageWidth));
 }
 
 async function makeWhiteTransparent(src: string): Promise<string> {
@@ -152,7 +213,8 @@ function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: 
     iaX: x,
     iaY: y,
     suggestedX: x,
-    suggestedY: y
+    suggestedY: y,
+    manualSize: false
   };
 }
 
@@ -264,6 +326,10 @@ export default function Home() {
   }, [pdfDoc, pageNum, zoom]);
 
   useEffect(() => {
+    setFields((current) => autoSizeFields(current, pageSize.width));
+  }, [pageSize.width]);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (isTypingTarget(event.target)) return;
       if (!selectedField) {
@@ -347,6 +413,8 @@ export default function Home() {
     const document = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
     const activeMemory = memory || loadMemory();
     if (!memory) setMemory(activeMemory);
+    const firstPage = await document.getPage(1);
+    const firstViewport = firstPage.getViewport({ scale: 1 });
     const pdfText = await extractPdfText(document);
     const contentCode = detectCode(`${file.name}\n${pdfText}`);
     const fileCode = detectCode(file.name);
@@ -357,6 +425,7 @@ export default function Home() {
     setFileName(file.name);
     setCurrentMemoryKey(contentCode || fileCode);
     setPageNum(0);
+    setPageSize({ width: firstViewport.width, height: firstViewport.height });
     setFields([]);
     setSelectedId("");
 
@@ -371,11 +440,12 @@ export default function Home() {
           iaX: field.x,
           iaY: field.y,
           suggestedX: field.x,
-          suggestedY: field.y
+          suggestedY: field.y,
+          manualSize: field.manualSize || false
         })),
         contractorData
       );
-      setFields(remembered);
+      setFields(autoSizeFields(remembered, firstViewport.width));
       setStatus(`Usando memoria exacta para ${knownKey}. No se aplicaron promedios ni offsets.`);
     } else {
       setStatus("PDF cargado. Analizando automaticamente con IA...");
@@ -406,13 +476,15 @@ export default function Home() {
       iaX: x,
       iaY: y,
       suggestedX: x,
-      suggestedY: y
+      suggestedY: y,
+      manualSize: false
     };
-    setFields((current) => [...current, field]);
-    setSelectedId(field.id);
+    const sizedField = autoSizeField(field, pageSize.width, true);
+    setFields((current) => [...current, sizedField]);
+    setSelectedId(sizedField.id);
     setSelectedQuick(option);
     setDownloadUrl("");
-    return field.id;
+    return sizedField.id;
   }
 
   function addFieldFromDoubleClick(x: number, y: number) {
@@ -431,7 +503,24 @@ export default function Home() {
   }
 
   function updateField(id: string, patch: Partial<PdfField>) {
-    setFields((current) => current.map((field) => (field.id === id ? { ...field, ...patch } : field)));
+    setFields((current) =>
+      current.map((field) => {
+        if (field.id !== id) return field;
+        const sizeChanged = "w" in patch || "h" in patch;
+        const contentChanged = "valor" in patch || "nombre" in patch || "fontSize" in patch || "tipo" in patch;
+        const next = {
+          ...field,
+          ...patch,
+          manualSize: sizeChanged ? true : field.manualSize
+        };
+
+        if (contentChanged && !next.manualSize) {
+          return autoSizeField(next, pageSize.width, true);
+        }
+
+        return next;
+      })
+    );
     setDownloadUrl("");
   }
 
@@ -453,13 +542,25 @@ export default function Home() {
       iaX: field.x + dx,
       iaY: field.y + dy,
       suggestedX: field.x + dx,
-      suggestedY: field.y + dy
+      suggestedY: field.y + dy,
+      manualSize: field.manualSize || false
     };
-    setFields((current) => [...current, copy]);
-    setSelectedId(copy.id);
+    const sizedCopy = copy.manualSize ? copy : autoSizeField(copy, pageSize.width, true);
+    setFields((current) => [...current, sizedCopy]);
+    setSelectedId(sizedCopy.id);
     setEditingId("");
     setDownloadUrl("");
-    setStatus(`Copiado: ${copy.nombre}`);
+    setStatus(`Copiado: ${sizedCopy.nombre}`);
+  }
+
+  function autoFitSelectedField() {
+    if (!selectedField) return;
+    setFields((current) =>
+      current.map((field) =>
+        field.id === selectedField.id ? autoSizeField({ ...field, manualSize: false }, pageSize.width, true) : field
+      )
+    );
+    setDownloadUrl("");
   }
 
   function copySelectedField() {
@@ -538,7 +639,8 @@ export default function Home() {
     const resizingField = fields.find((field) => field.id === resize.id);
     const patch: Partial<PdfField> = {
       w: clamp(resize.startW + dx, 20, pageSize.width),
-      h: nextH
+      h: nextH,
+      manualSize: true
     };
     if (resizingField?.tipo === "texto" || resizingField?.tipo === "checkbox") {
       patch.fontSize = clamp(Math.round(nextH * 0.48), 6, 18);
@@ -617,7 +719,8 @@ export default function Home() {
     }
 
     const completedFields = autocompleteFields(detected, contractorData);
-    setFields(activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields);
+    const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
+    setFields(autoSizeFields(adjustedFields, pageSize.width));
     setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
   }
 
@@ -683,7 +786,8 @@ export default function Home() {
           iaX: field.x,
           iaY: field.y,
           suggestedX: field.x,
-          suggestedY: field.y
+          suggestedY: field.y,
+          manualSize: field.manualSize || false
         }))
       );
     }
@@ -911,6 +1015,11 @@ export default function Home() {
                   {(selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
                     <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={() => setEditingId(selectedField.id)}>
                       Editar en PDF
+                    </button>
+                  )}
+                  {(selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
+                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={autoFitSelectedField}>
+                      Ajustar al texto
                     </button>
                   )}
                 </div>
