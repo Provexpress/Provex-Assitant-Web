@@ -44,6 +44,23 @@ function clientConfig(): { client: OpenAI; model: string; provider: string } {
   };
 }
 
+const systemPrompt = `Eres Provex Assistant, un motor especializado en diligenciar formularios PDF empresariales colombianos.
+
+Tu unica salida permitida es un objeto JSON valido. No expliques, no saludes, no uses markdown.
+
+Objetivo:
+- Detectar campos vacios en formularios PDF.
+- Asignar datos reales del contratista.
+- Proponer coordenadas precisas para que el usuario revise y ajuste visualmente.
+
+Criterios de calidad:
+- Prioriza precision de ubicacion sobre cantidad de campos.
+- No rellenes encima de etiquetas impresas.
+- No inventes datos.
+- No sobrescribas datos claros de otra empresa o persona.
+- Si dudas de una casilla, dejala sin marcar.
+- Usa nombres de campo humanos y faciles de revisar.`;
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -59,7 +76,7 @@ export async function POST(request: NextRequest) {
     }
 
     const { client, model, provider } = clientConfig();
-    const prompt = `Analiza esta imagen de un formulario PDF empresarial colombiano.
+    const prompt = `Analiza esta imagen de un formulario PDF empresarial colombiano y devuelve campos editables para rellenarlo.
 
 DATOS DEL CONTRATISTA:
 ${JSON.stringify(contractorData, null, 2)}
@@ -74,7 +91,7 @@ PAGINA:
 
 Identifica campos vacios: lineas, espacios en blanco, checkboxes, firma y huella. Usa los DATOS DEL CONTRATISTA para proponer el valor correcto.
 
-Devuelve SOLO JSON valido:
+Formato obligatorio, SOLO JSON valido:
 {"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.6}]}
 
 Reglas:
@@ -82,8 +99,10 @@ Reglas:
 - La imagen fue renderizada a 2x, divide pixeles entre 2.
 - x/y son la esquina superior izquierda de la caja editable que se vera sobre el PDF.
 - Escribe donde empieza el espacio vacio o la linea para llenar, no sobre la etiqueta impresa.
-- El texto debe quedar dentro de la linea o espacio disponible. Devuelve w/h aproximados del espacio real para poder encoger texto largo.
-- Si el valor es muy largo, aumenta w hasta el final de la linea disponible; no lo dejes encima de otras palabras.
+- El texto debe quedar dentro de la linea o espacio disponible.
+- Devuelve w/h aproximados del espacio real, no cajas enormes.
+- Si el valor es muy largo, usa el ancho disponible de la linea; no lo pongas encima de otras palabras.
+- Ajusta fontsize al formulario: normalmente 7-10. Usa 8 si el espacio es pequeno.
 - No agregues campos que ya esten diligenciados con datos claros de otra empresa/persona.
 - No repitas campos.
 - tipo solo puede ser texto, checkbox, firma o huella.
@@ -96,6 +115,7 @@ Reglas:
       temperature: 0,
       max_tokens: 4096,
       messages: [
+        { role: "system", content: systemPrompt },
         {
           role: "user",
           content: [

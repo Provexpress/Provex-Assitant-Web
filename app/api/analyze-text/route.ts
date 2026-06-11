@@ -44,6 +44,23 @@ function clientConfig(): { client: OpenAI; model: string; provider: string } {
   };
 }
 
+const systemPrompt = `Eres Provex Assistant, un motor especializado en diligenciar formularios PDF empresariales colombianos.
+
+Tu unica salida permitida es un objeto JSON valido. No expliques, no saludes, no uses markdown.
+
+Objetivo:
+- Usar la estructura textual del PDF para detectar campos vacios.
+- Asignar datos reales del contratista.
+- Preferir coordenadas ya detectadas por el extractor antes que inventar nuevas.
+
+Criterios de calidad:
+- Prioriza precision sobre cantidad.
+- No rellenes encima de etiquetas impresas.
+- No inventes datos.
+- No sobrescribas datos claros de otra empresa o persona.
+- Si dudas de una casilla, dejala sin marcar.
+- Usa nombres de campo humanos y faciles de revisar.`;
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -57,7 +74,7 @@ export async function POST(request: NextRequest) {
     }
 
     const { client, model, provider } = clientConfig();
-    const prompt = `Eres un asistente que rellena formularios PDF empresariales colombianos.
+    const prompt = `Analiza esta pagina de un formulario PDF empresarial colombiano y devuelve campos editables para rellenarla.
 
 DATOS DEL CONTRATISTA:
 ${JSON.stringify(contractorData, null, 2)}
@@ -78,12 +95,14 @@ TAREA:
 4. Para checkboxes, marca con "X" solo la opcion correcta.
 5. Para firma y huella, usa tipo "firma" o "huella".
 
-Devuelve SOLO JSON valido:
+Formato obligatorio, SOLO JSON valido:
 {"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":217,"y":124,"w":160,"h":22,"tipo":"texto","fontsize":9,"confianza":0.85,"source_zone":"after_label:TERCERO A EVALUAR:"}]}
 
 REGLAS:
 - Usa las coordenadas x, y de las zonas detectadas cuando correspondan. Son la esquina superior izquierda del campo editable.
 - Si una zona no tiene dato correspondiente, omitela.
+- Devuelve w/h aproximados del espacio real, no cajas enormes.
+- Ajusta fontsize al formulario: normalmente 7-10. Usa 8 si el espacio es pequeno.
 - tipo solo puede ser texto, checkbox, firma o huella.
 - confianza: 0.85 si usas una zona detectada, 0.6 si agregas una zona no detectada.
 - Si no sabes que dato va, deja valor vacio.
@@ -93,7 +112,10 @@ REGLAS:
       model,
       temperature: 0,
       max_tokens: 4096,
-      messages: [{ role: "user", content: prompt }]
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: prompt }
+      ]
     });
 
     return NextResponse.json({
