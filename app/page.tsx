@@ -2,7 +2,7 @@
 
 import { PublicClientApplication, type AccountInfo } from "@azure/msal-browser";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { autocompleteFields } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
 import { applyMemoryOffsets, detectCode, learnFromConfirmation, loadMemory, resetMemory } from "../lib/memory";
@@ -52,6 +52,12 @@ type ResizeState = {
 type TransparentImages = {
   firma: string;
   huella: string;
+};
+
+type Toast = {
+  id: string;
+  message: string;
+  type: "success" | "info" | "error" | "warning";
 };
 
 const pdfJsUrl = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
@@ -249,6 +255,56 @@ async function extractPdfText(pdfDocument: PdfJsDocument, maxPages = 3) {
   return chunks.join("\n").replace(/\s+/g, " ").trim().slice(0, 5000);
 }
 
+function getConfidenceClass(field: PdfField): string {
+  if (field.source === "manual") return "conf-manual";
+  if (field.confianza >= 0.8) return "conf-high";
+  if (field.confianza >= 0.5) return "conf-mid";
+  return "conf-low";
+}
+
+function getConfidenceDotClass(field: PdfField): string {
+  if (field.source === "manual") return "field-card-dot--manual";
+  if (field.confianza >= 0.8) return "field-card-dot--high";
+  if (field.confianza >= 0.5) return "field-card-dot--mid";
+  return "field-card-dot--low";
+}
+
+function getTypeBadgeClass(tipo: FieldType): string {
+  if (tipo === "checkbox") return "badge-check";
+  if (tipo === "firma") return "badge-firma";
+  if (tipo === "huella") return "badge-huella";
+  return "badge-texto";
+}
+
+function getTypeBadgeLabel(tipo: FieldType): string {
+  if (tipo === "checkbox") return "✓ Check";
+  if (tipo === "firma") return "🖊 Firma";
+  if (tipo === "huella") return "🖐 Huella";
+  return "T Texto";
+}
+
+function getStatusInfo(status: string): { type: "analyzing" | "done" | "error" | "idle"; icon: string } {
+  const lower = status.toLowerCase();
+  if (lower.includes("analizando") || lower.includes("extrayendo") || lower.includes("generando") || lower.includes("cargando") || lower.includes("pagina")) {
+    return { type: "analyzing", icon: "⚙️" };
+  }
+  if (lower.includes("generado") || lower.includes("memoria exacta") || lower.includes("detecto")) {
+    return { type: "done", icon: "✅" };
+  }
+  if (lower.includes("error") || lower.includes("no pudo") || lower.includes("fallo")) {
+    return { type: "error", icon: "❌" };
+  }
+  return { type: "idle", icon: "ℹ️" };
+}
+
+function getUserInitials(username: string): string {
+  const parts = username.replace(/@.*/, "").split(/[.\s_-]/);
+  return parts
+    .slice(0, 2)
+    .map((p) => p[0]?.toUpperCase() || "")
+    .join("");
+}
+
 export default function Home() {
   const contractorData = useMemo(() => getContractorData(), []);
   const fieldOptions = useMemo(() => getFieldOptions(), []);
@@ -280,9 +336,36 @@ export default function Home() {
     huella: "/firmas/huella.png"
   });
 
+  // ── New UI state ──────────────────────────────────────────────────
+  const [darkMode, setDarkMode] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [customFieldValue, setCustomFieldValue] = useState("");
+  const [customFieldName, setCustomFieldName] = useState("");
+
   const selectedField = fields.find((field) => field.id === selectedId);
   const pageFields = fields.filter((field) => field.pageNum === pageNum);
 
+  // ── Toast helper ──────────────────────────────────────────────────
+  const addToast = useCallback((message: string, type: Toast["type"] = "info") => {
+    const id = `toast_${Date.now()}`;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  }, []);
+
+  const toastIcon = (type: Toast["type"]) => {
+    if (type === "success") return "✅";
+    if (type === "error") return "❌";
+    if (type === "warning") return "⚠️";
+    return "ℹ️";
+  };
+
+  // ── Effects ───────────────────────────────────────────────────────
   useEffect(() => {
     setMemory(loadMemory());
   }, []);
@@ -332,6 +415,10 @@ export default function Home() {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (isTypingTarget(event.target)) return;
+      if (event.key === "Escape" && showModal) {
+        setShowModal(false);
+        return;
+      }
       if (!selectedField) {
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
           event.preventDefault();
@@ -375,8 +462,9 @@ export default function Home() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedField, pageNum, pageSize.width, pageSize.height]);
+  }, [selectedField, pageNum, pageSize.width, pageSize.height, showModal]);
 
+  // ── Auth ──────────────────────────────────────────────────────────
   async function loginMicrosoft() {
     const tenantId = process.env.NEXT_PUBLIC_MS_TENANT_ID || "";
     const clientId = process.env.NEXT_PUBLIC_MS_CLIENT_ID || "";
@@ -405,6 +493,7 @@ export default function Home() {
     setAuthStatus(result.account?.username || "Sesion iniciada");
   }
 
+  // ── PDF Logic (unchanged) ─────────────────────────────────────────
   async function openPdf(file: File) {
     setStatus("Cargando PDF...");
     setDownloadUrl("");
@@ -447,6 +536,7 @@ export default function Home() {
       );
       setFields(autoSizeFields(remembered, firstViewport.width));
       setStatus(`Usando memoria exacta para ${knownKey}. No se aplicaron promedios ni offsets.`);
+      addToast(`🧠 Memoria cargada — ${remembered.length} campos`, "success");
     } else {
       setStatus("PDF cargado. Analizando automaticamente con IA...");
       try {
@@ -484,6 +574,7 @@ export default function Home() {
     setSelectedId(sizedField.id);
     setSelectedQuick(option);
     setDownloadUrl("");
+    addToast(`➕ Campo agregado: ${option.label}`, "success");
     return sizedField.id;
   }
 
@@ -525,10 +616,12 @@ export default function Home() {
   }
 
   function removeField(id: string) {
-    setFields((current) => current.filter((field) => field.id !== id));
+    const field = fields.find((f) => f.id === id);
+    setFields((current) => current.filter((f) => f.id !== id));
     setSelectedId("");
     setEditingId("");
     setDownloadUrl("");
+    if (field) addToast(`🗑️ Campo eliminado: ${field.nombre}`, "warning");
   }
 
   function duplicateField(field: PdfField, dx = 14, dy = 14) {
@@ -550,7 +643,7 @@ export default function Home() {
     setSelectedId(sizedCopy.id);
     setEditingId("");
     setDownloadUrl("");
-    setStatus(`Copiado: ${sizedCopy.nombre}`);
+    addToast(`📋 Duplicado: ${sizedCopy.nombre}`, "info");
   }
 
   function autoFitSelectedField() {
@@ -567,13 +660,13 @@ export default function Home() {
     if (!selectedField) return;
     copiedFieldRef.current = selectedField;
     setCopiedLabel(selectedField.nombre);
-    setStatus(`Campo copiado: ${selectedField.nombre}`);
+    addToast(`📋 Copiado: ${selectedField.nombre}`, "info");
   }
 
   function pasteCopiedField() {
     const copied = copiedFieldRef.current;
     if (!copied) {
-      setStatus("No hay campo copiado.");
+      addToast("No hay campo copiado", "warning");
       return;
     }
     duplicateField({ ...copied, pageNum }, 18, 18);
@@ -660,68 +753,74 @@ export default function Home() {
 
   async function analyzeDocument(pdfDocument: PdfJsDocument, memoryOverride: LocalMemory | null = memory) {
     setStatus("Extrayendo estructura del PDF...");
+    setIsAnalyzing(true);
     const detected: PdfField[] = [];
     const activeMemory = memoryOverride || memory;
 
-    for (let index = 0; index < pdfDocument.numPages; index += 1) {
-      setStatus(`Analizando pagina ${index + 1}/${pdfDocument.numPages}...`);
-      const pageStruct: PageStructure = await extractPageStructure(pdfDocument, index);
-      let campos: Array<Record<string, unknown>> = [];
+    try {
+      for (let index = 0; index < pdfDocument.numPages; index += 1) {
+        setStatus(`Analizando pagina ${index + 1}/${pdfDocument.numPages}...`);
+        const pageStruct: PageStructure = await extractPageStructure(pdfDocument, index);
+        let campos: Array<Record<string, unknown>> = [];
 
-      if (pageStruct.hasEnoughText) {
-        setStatus(`Pagina ${index + 1}: usando analisis por texto (${pageStruct.emptyZones.length} zonas detectadas)...`);
+        if (pageStruct.hasEnoughText) {
+          setStatus(`Pagina ${index + 1}: usando analisis por texto (${pageStruct.emptyZones.length} zonas detectadas)...`);
 
-        const response = await fetch("/api/analyze-text", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            structuredText: pageStruct.structuredText,
-            contractorData,
-            memoryHints: activeMemory ? memoryHints(activeMemory) : "",
-            emptyZones: pageStruct.emptyZones
-          })
-        });
+          const response = await fetch("/api/analyze-text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              structuredText: pageStruct.structuredText,
+              contractorData,
+              memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+              emptyZones: pageStruct.emptyZones
+            })
+          });
 
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Analisis de texto fallo");
-        campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
-      } else {
-        setStatus(`Pagina ${index + 1}: PDF sin texto suficiente, usando Vision...`);
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Analisis de texto fallo");
+          campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+        } else {
+          setStatus(`Pagina ${index + 1}: PDF sin texto suficiente, usando Vision...`);
 
-        const page = await pdfDocument.getPage(index + 1);
-        const viewport = page.getViewport({ scale: 2 });
-        const canvas = document.createElement("canvas");
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        const context = canvas.getContext("2d");
-        if (!context) continue;
-        await page.render({ canvasContext: context, viewport }).promise;
+          const page = await pdfDocument.getPage(index + 1);
+          const viewport = page.getViewport({ scale: 2 });
+          const canvas = document.createElement("canvas");
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          const context = canvas.getContext("2d");
+          if (!context) continue;
+          await page.render({ canvasContext: context, viewport }).promise;
 
-        const response = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            imageDataUrl: canvas.toDataURL("image/png"),
-            contractorData,
-            memoryHints: activeMemory ? memoryHints(activeMemory) : "",
-            pageNumber: index + 1,
-            pageWidth: pageStruct.width,
-            pageHeight: pageStruct.height
-          })
-        });
+          const response = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              imageDataUrl: canvas.toDataURL("image/png"),
+              contractorData,
+              memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+              pageNumber: index + 1,
+              pageWidth: pageStruct.width,
+              pageHeight: pageStruct.height
+            })
+          });
 
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Vision fallo");
-        campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Vision fallo");
+          campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+        }
+
+        detected.push(...campos.map((field: Record<string, unknown>, fieldIndex: number) => normalizeAiField(field, index, fieldIndex)));
       }
 
-      detected.push(...campos.map((field: Record<string, unknown>, fieldIndex: number) => normalizeAiField(field, index, fieldIndex)));
+      const completedFields = autocompleteFields(detected, contractorData);
+      const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
+      setFields(autoSizeFields(adjustedFields, pageSize.width));
+      setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
+      addToast(`🤖 IA detectó ${detected.length} campos`, "success");
+    } finally {
+      setIsAnalyzing(false);
     }
-
-    const completedFields = autocompleteFields(detected, contractorData);
-    const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
-    setFields(autoSizeFields(adjustedFields, pageSize.width));
-    setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
   }
 
   async function analyzeWithAi() {
@@ -730,70 +829,102 @@ export default function Home() {
       await analyzeDocument(pdfDoc);
     } catch (error) {
       setStatus(error instanceof Error ? `La IA no pudo analizar: ${error.message}` : "La IA no pudo analizar el PDF.");
+      addToast("Error al analizar con IA", "error");
     }
   }
 
   async function generatePdf() {
     if (!pdfBytes) return;
     setStatus("Generando PDF...");
-    const document = await PDFDocument.load(pdfBytes.slice(0));
-    const font = await document.embedFont(StandardFonts.Helvetica);
-    const signatureBytes = await fetch(transparentImages.firma).then((res) => res.arrayBuffer());
-    const fingerprintBytes = await fetch(transparentImages.huella).then((res) => res.arrayBuffer());
-    const signature = await document.embedPng(signatureBytes);
-    const fingerprint = await document.embedPng(fingerprintBytes);
+    setIsGenerating(true);
+    try {
+      const document = await PDFDocument.load(pdfBytes.slice(0));
+      const font = await document.embedFont(StandardFonts.Helvetica);
+      const signatureBytes = await fetch(transparentImages.firma).then((res) => res.arrayBuffer());
+      const fingerprintBytes = await fetch(transparentImages.huella).then((res) => res.arrayBuffer());
+      const signature = await document.embedPng(signatureBytes);
+      const fingerprint = await document.embedPng(fingerprintBytes);
 
-    for (const field of fields) {
-      const page = document.getPages()[field.pageNum];
-      if (!page) continue;
-      const { height } = page.getSize();
-      const y = height - field.y - (field.tipo === "texto" || field.tipo === "checkbox" ? field.fontSize : field.h);
+      for (const field of fields) {
+        const page = document.getPages()[field.pageNum];
+        if (!page) continue;
+        const { height } = page.getSize();
+        const y = height - field.y - (field.tipo === "texto" || field.tipo === "checkbox" ? field.fontSize : field.h);
 
-      if (field.tipo === "texto" && field.valor) {
-        const fittedSize = fitFontSize(font, field.valor, field.fontSize, Math.max(12, field.w - 4));
-        page.drawText(field.valor, {
-          x: field.x,
-          y,
-          size: fittedSize,
-          font,
-          color: rgb(0, 0, 0),
-          maxWidth: field.w
-        });
-      } else if (field.tipo === "checkbox" && field.valor) {
-        const fittedSize = fitFontSize(font, "X", field.fontSize, Math.max(10, field.w));
-        page.drawText("X", { x: field.x, y, size: fittedSize, font, color: rgb(0, 0, 0) });
-      } else if (field.tipo === "firma") {
-        page.drawImage(signature, { x: field.x, y, width: field.w, height: field.h });
-      } else if (field.tipo === "huella") {
-        page.drawImage(fingerprint, { x: field.x, y, width: field.w, height: field.h });
+        if (field.tipo === "texto" && field.valor) {
+          const fittedSize = fitFontSize(font, field.valor, field.fontSize, Math.max(12, field.w - 4));
+          page.drawText(field.valor, {
+            x: field.x,
+            y,
+            size: fittedSize,
+            font,
+            color: rgb(0, 0, 0),
+            maxWidth: field.w
+          });
+        } else if (field.tipo === "checkbox" && field.valor) {
+          const fittedSize = fitFontSize(font, "X", field.fontSize, Math.max(10, field.w));
+          page.drawText("X", { x: field.x, y, size: fittedSize, font, color: rgb(0, 0, 0) });
+        } else if (field.tipo === "firma") {
+          page.drawImage(signature, { x: field.x, y, width: field.w, height: field.h });
+        } else if (field.tipo === "huella") {
+          page.drawImage(fingerprint, { x: field.x, y, width: field.w, height: field.h });
+        }
       }
-    }
 
-    const bytes = await document.save();
-    const pdfBuffer = new ArrayBuffer(bytes.byteLength);
-    new Uint8Array(pdfBuffer).set(bytes);
-    const blob = new Blob([pdfBuffer], { type: "application/pdf" });
-    if (downloadUrl) URL.revokeObjectURL(downloadUrl);
-    setDownloadUrl(URL.createObjectURL(blob));
-    if (memory) {
-      const learned = learnFromConfirmation(memory, currentMemoryKey || fileName, fields, [fileName]);
-      setMemory(learned);
-      setFields((current) =>
-        current.map((field) => ({
-          ...field,
-          source: "memoria",
-          confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
-          iaX: field.x,
-          iaY: field.y,
-          suggestedX: field.x,
-          suggestedY: field.y,
-          manualSize: field.manualSize || false
-        }))
-      );
+      const bytes = await document.save();
+      const pdfBuffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(pdfBuffer).set(bytes);
+      const blob = new Blob([pdfBuffer], { type: "application/pdf" });
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+      setDownloadUrl(URL.createObjectURL(blob));
+      if (memory) {
+        const learned = learnFromConfirmation(memory, currentMemoryKey || fileName, fields, [fileName]);
+        setMemory(learned);
+        setFields((current) =>
+          current.map((field) => ({
+            ...field,
+            source: "memoria",
+            confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
+            iaX: field.x,
+            iaY: field.y,
+            suggestedX: field.x,
+            suggestedY: field.y,
+            manualSize: field.manualSize || false
+          }))
+        );
+      }
+      setStatus("PDF generado. La memoria local guardo estas posiciones exactas.");
+      addToast("💾 PDF generado y listo para descargar", "success");
+    } finally {
+      setIsGenerating(false);
     }
-    setStatus("PDF generado. La memoria local guardo estas posiciones exactas.");
   }
 
+  // ── Computed values ───────────────────────────────────────────────
+  const avgConfidence = fields.length > 0
+    ? Math.round((fields.reduce((sum, f) => sum + f.confianza, 0) / fields.length) * 100)
+    : 0;
+
+  const statusInfo = getStatusInfo(status);
+
+  // ── Add custom field from modal ──────────────────────────────────
+  function addCustomField() {
+    if (!customFieldName.trim()) return;
+    const option: FieldOption = {
+      key: "custom",
+      label: customFieldName.trim(),
+      type: "texto",
+      value: customFieldValue.trim()
+    };
+    addField(option);
+    setCustomFieldName("");
+    setCustomFieldValue("");
+    setShowModal(false);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // AUTH GATE
+  // ═══════════════════════════════════════════════════════════════════
   if (!account) {
     return (
       <main className="px-auth-gate">
@@ -804,280 +935,562 @@ export default function Home() {
                 <img alt="Provexpress" src="/brand/provex-logo.jpeg" />
               </div>
               <p className="px-eyebrow px-mt-4">Provex Assistant Web</p>
-              <h1 className="px-title px-title--hero">Editor de PDFs con IA</h1>
-              <p className="px-copy">Rellena formularios, revisa en el PDF y descarga el archivo listo.</p>
+              <h1 className="px-title px-title--hero">Editor de PDFs<br />con Inteligencia Artificial</h1>
+              <p className="px-copy">Rellena formularios automáticamente, revisa en el PDF y descarga el archivo listo en segundos.</p>
             </div>
             <div className="px-feature-list">
-              <div className="px-feature"><span className="px-dot" /> Login Microsoft 365</div>
+              <div className="px-feature"><span className="px-dot" /> Análisis automático con IA Gemini</div>
               <div className="px-feature"><span className="px-dot px-dot--purple" /> Memoria local sin base de datos</div>
-              <div className="px-feature"><span className="px-dot" /> Despliegue directo en Vercel</div>
+              <div className="px-feature"><span className="px-dot" /> Login seguro con Microsoft 365</div>
             </div>
           </div>
           <div className="px-auth-action">
             <div className="px-logo px-logo--sm px-logo--brand">
               <img alt="Provexpress" src="/brand/provex-icon.png" />
             </div>
-            <h2 className="px-title px-mt-4">Continuar con Microsoft</h2>
-            <p className="px-copy">Usa tu cuenta corporativa para entrar al editor.</p>
-            <button className="px-btn px-btn--primary px-mt-4" type="button" onClick={loginMicrosoft}>
-              Continuar con Microsoft 365
+            <h2 className="px-title px-mt-4">Bienvenido de vuelta</h2>
+            <p className="px-copy">Usa tu cuenta corporativa de Provexpress para acceder al editor.</p>
+            <button className="px-btn px-btn--primary px-mt-4" type="button" onClick={loginMicrosoft} style={{ width: "100%" }}>
+              <span>🔐</span> Continuar con Microsoft 365
             </button>
-            <p className="px-help px-mt-4">{authStatus}</p>
+            <p className="px-help px-mt-4" style={{ textAlign: "center" }}>{authStatus}</p>
           </div>
         </section>
       </main>
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════
+  // MAIN APP
+  // ═══════════════════════════════════════════════════════════════════
   return (
-    <main className="app-frame">
+    <main className={`app-frame${darkMode ? " is-dark" : ""}`}>
+
+      {/* ── Topbar ─────────────────────────────────────────────────── */}
       <header className="px-topbar">
-        <div className="px-brand">
+        <div className="topbar-left">
           <div className="px-logo px-logo--sm px-logo--brand">
             <img alt="Provexpress" src="/brand/provex-icon.png" />
           </div>
           <div className="px-brand__meta">
-            <h1 className="px-brand__title">Provex Assistant Web</h1>
-            <p className="px-brand__subtitle">{account.username}</p>
+            <h1 className="px-brand__title">Provex Assistant</h1>
+            <p className="px-brand__subtitle">Editor de PDFs · IA</p>
           </div>
         </div>
-        <div className="px-actions">
-          <label className="px-btn px-btn--secondary">
-            Subir PDF
-            <input hidden type="file" accept="application/pdf" onChange={(event) => event.target.files?.[0] && openPdf(event.target.files[0])} />
-          </label>
-          <button className="px-btn px-btn--ghost" type="button" onClick={() => setZoom((value) => Math.max(0.7, value - 0.1))}>
-            Zoom -
+
+        <div className="topbar-right">
+          <div className="topbar-user">
+            <div className="topbar-user-avatar">{getUserInitials(account.username || "U")}</div>
+            <span className="topbar-user-name">{account.username}</span>
+          </div>
+          <button
+            className="dark-toggle"
+            type="button"
+            title={darkMode ? "Modo claro" : "Modo oscuro"}
+            onClick={() => setDarkMode((v) => !v)}
+          >
+            {darkMode ? "☀️" : "🌙"}
           </button>
-          <button className="px-btn px-btn--ghost" type="button" onClick={() => setZoom((value) => Math.min(3, value + 0.1))}>
-            Zoom +
-          </button>
-          <button className="px-btn px-btn--ghost" type="button" disabled={!selectedField} onClick={copySelectedField}>
-            Copiar
-          </button>
-          <button className="px-btn px-btn--ghost" type="button" disabled={!copiedLabel} onClick={pasteCopiedField}>
-            Pegar
-          </button>
-          <button className="px-btn px-btn--ghost" type="button" disabled={!selectedField} onClick={() => selectedField && duplicateField(selectedField)}>
-            Duplicar
-          </button>
-          <button className="px-btn px-btn--primary" type="button" disabled={!pdfDoc} onClick={analyzeWithAi}>
-            Analizar con IA
-          </button>
-          <button className="px-btn px-btn--accent" type="button" disabled={!pdfBytes || !fields.length} onClick={generatePdf}>
-            Generar PDF
-          </button>
-          {downloadUrl && (
-            <a className="px-btn px-btn--primary" href={downloadUrl} download={`RELLENADO_${fileName || "formulario.pdf"}`}>
-              Descargar
-            </a>
-          )}
         </div>
       </header>
 
-      <p className="px-alert px-mt-4">{status}</p>
+      {/* ── Stats Bar ──────────────────────────────────────────────── */}
+      {pdfDoc && (
+        <div className="stats-bar px-mt-4">
+          <div className="stat-card">
+            <div className="stat-icon stat-icon--blue">📄</div>
+            <div className="stat-info">
+              <span className="stat-value">{pdfDoc.numPages}</span>
+              <span className="stat-label">Páginas</span>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-icon--green">🔍</div>
+            <div className="stat-info">
+              <span className="stat-value">{fields.length}</span>
+              <span className="stat-label">Campos detectados</span>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-icon--purple">🎯</div>
+            <div className="stat-info">
+              <span className="stat-value">{avgConfidence}%</span>
+              <span className="stat-label">Confianza promedio</span>
+            </div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-icon stat-icon--amber">🧠</div>
+            <div className="stat-info">
+              <span className="stat-value">{memory ? Object.keys(memory.formulariosConocidos).length : 0}</span>
+              <span className="stat-label">En memoria</span>
+            </div>
+          </div>
+        </div>
+      )}
 
-      <section className="studio-shell px-mt-4">
-        <div className="pdf-stage">
-          {!pdfDoc && (
-            <div className="drop-zone">
-              <div>
-                <h2 className="px-panel__title">Sube un PDF</h2>
-                <p className="px-copy">Luego usa IA o agrega campos manualmente desde el panel lateral.</p>
-              </div>
+      {/* ── Status Alert ───────────────────────────────────────────── */}
+      <div className={`status-alert px-mt-4 status-${statusInfo.type}`}>
+        <span className="status-icon">{statusInfo.icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <span>{status}</span>
+          {statusInfo.type === "analyzing" && (
+            <div className="status-progress">
+              <div className="status-progress-bar" style={{ width: "60%" }} />
             </div>
           )}
-          {pdfDoc && (
-            <div
-              className="pdf-page"
-              style={{ width: pageSize.width * zoom, height: pageSize.height * zoom }}
-              onDoubleClick={(event) => {
-                const rect = event.currentTarget.getBoundingClientRect();
-                addFieldFromDoubleClick((event.clientX - rect.left) / zoom, (event.clientY - rect.top) / zoom);
-              }}
-            >
-              <canvas className="pdf-canvas" ref={canvasRef} />
-              <div className="field-layer" onPointerDown={() => setSelectedId("")}>
-                {pageFields.map((field) => (
-                  <div
-                    key={field.id}
-                    className={`pdf-field ${field.id === selectedId ? "is-selected" : ""} ${field.tipo === "firma" || field.tipo === "huella" ? "is-image" : ""}`}
-                    style={{
-                      left: field.x * zoom,
-                      top: field.y * zoom,
-                      width: field.w * zoom,
-                      height: field.h * zoom,
-                      fontSize: Math.max(8, field.fontSize * zoom)
-                    }}
-                    onPointerDown={(event) => startDrag(event, field)}
-                    onDoubleClick={(event) => {
-                      event.stopPropagation();
-                      setSelectedId(field.id);
-                      if (field.tipo === "texto" || field.tipo === "checkbox") {
-                        setEditingId(field.id);
-                      }
-                    }}
-                    title={`${field.nombre} - confianza ${field.confianza.toFixed(2)}`}
-                  >
-                    <span className="field-content">
-                      {editingId === field.id && (field.tipo === "texto" || field.tipo === "checkbox") ? (
-                      <input
-                        autoFocus
-                        className="field-inline-input"
-                        value={field.valor}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onChange={(event) => updateField(field.id, { valor: event.target.value })}
-                        onBlur={() => setEditingId("")}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === "Escape") {
-                            event.preventDefault();
-                            setEditingId("");
-                          }
-                        }}
-                      />
-                      ) : field.tipo === "firma" ? (
-                        <img alt="Firma" src={transparentImages.firma} />
-                      ) : field.tipo === "huella" ? (
-                        <img alt="Huella" src={transparentImages.huella} />
-                      ) : field.tipo === "checkbox" ? (
-                        field.valor || "X"
-                      ) : (
-                        field.valor
-                      )}
-                    </span>
-                    <button
-                      className="field-resize"
-                      type="button"
-                      aria-label="Redimensionar campo"
-                      onPointerDown={(event) => startResize(event, field)}
-                    />
-                  </div>
-                ))}
+        </div>
+      </div>
+
+      {/* ── Editor Toolbar ─────────────────────────────────────────── */}
+      <div className="editor-toolbar px-mt-4">
+        <label className="toolbar-btn toolbar-btn--upload" title="Subir nuevo PDF">
+          📂 Subir PDF
+          <input hidden type="file" accept="application/pdf" onChange={(e) => e.target.files?.[0] && openPdf(e.target.files[0])} />
+        </label>
+
+        <div className="toolbar-sep" />
+
+        <button className="toolbar-btn" type="button" title="Reducir zoom" onClick={() => setZoom((v) => Math.max(0.7, v - 0.1))}>
+          🔍−
+        </button>
+        <span className="toolbar-zoom-pill">{Math.round(zoom * 100)}%</span>
+        <button className="toolbar-btn" type="button" title="Aumentar zoom" onClick={() => setZoom((v) => Math.min(3, v + 0.1))}>
+          🔍+
+        </button>
+
+        <div className="toolbar-sep" />
+
+        <button className="toolbar-btn" type="button" title="Copiar campo (Ctrl+C)" disabled={!selectedField} onClick={copySelectedField}>
+          📋 Copiar
+        </button>
+        <button className="toolbar-btn" type="button" title="Pegar campo (Ctrl+V)" disabled={!copiedLabel} onClick={pasteCopiedField}>
+          📌 Pegar
+        </button>
+        <button className="toolbar-btn" type="button" title="Duplicar campo (Ctrl+D)" disabled={!selectedField} onClick={() => selectedField && duplicateField(selectedField)}>
+          ⧉ Duplicar
+        </button>
+
+        {selectedField && (selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
+          <button className="toolbar-btn" type="button" title="Editar valor directamente en el PDF" onClick={() => setEditingId(selectedField.id)}>
+            ✏️ Editar
+          </button>
+        )}
+        {selectedField && (selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
+          <button className="toolbar-btn" type="button" title="Ajustar tamaño al texto" onClick={autoFitSelectedField}>
+            ↔️ Ajustar
+          </button>
+        )}
+
+        <div className="toolbar-sep" />
+
+        <button
+          className="toolbar-btn toolbar-btn--primary"
+          type="button"
+          title="Analizar PDF con Inteligencia Artificial"
+          disabled={!pdfDoc || isAnalyzing}
+          onClick={analyzeWithAi}
+        >
+          {isAnalyzing ? <span className="btn-spinner" /> : "🤖"} Analizar IA
+        </button>
+
+        <button
+          className="toolbar-btn toolbar-btn--accent"
+          type="button"
+          title="Generar PDF con los campos rellenados"
+          disabled={!pdfBytes || !fields.length || isGenerating}
+          onClick={generatePdf}
+        >
+          {isGenerating ? <span className="btn-spinner" /> : "⚡"} Generar PDF
+        </button>
+
+        {downloadUrl && (
+          <a className="toolbar-btn toolbar-btn--accent" href={downloadUrl} download={`RELLENADO_${fileName || "formulario.pdf"}`} title="Descargar PDF generado">
+            ⬇️ Descargar
+          </a>
+        )}
+      </div>
+
+      {/* ── Studio Shell ───────────────────────────────────────────── */}
+      <section className="studio-shell px-mt-4">
+
+        {/* ── PDF Stage ──────────────────────────────────────────── */}
+        <div>
+          <div
+            className={`pdf-stage${isDraggingOver ? " is-drag-over" : ""}`}
+            onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+            onDragLeave={() => setIsDraggingOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDraggingOver(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file?.type === "application/pdf") openPdf(file);
+            }}
+          >
+            {!pdfDoc && (
+              <div
+                className={`drop-zone${isDraggingOver ? " is-drag-over" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+              >
+                <div>
+                  <span className="drop-zone-icon">📄</span>
+                  <h2 className="drop-zone-title">Arrastra tu formulario aquí</h2>
+                  <p className="drop-zone-sub">
+                    Deja que la IA haga el trabajo pesado. Detecta campos automáticamente y los rellena con los datos de Provexpress.
+                  </p>
+                  <label className="drop-zone-cta">
+                    <span>📂</span> Seleccionar PDF
+                    <input hidden type="file" accept="application/pdf" onChange={(e) => e.target.files?.[0] && openPdf(e.target.files[0])} />
+                  </label>
+                </div>
               </div>
+            )}
+
+            {pdfDoc && (
+              <div
+                className="pdf-page"
+                style={{ width: pageSize.width * zoom, height: pageSize.height * zoom }}
+                onDoubleClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  addFieldFromDoubleClick((e.clientX - rect.left) / zoom, (e.clientY - rect.top) / zoom);
+                }}
+              >
+                <canvas className="pdf-canvas" ref={canvasRef} />
+                <div className="field-layer" onPointerDown={() => setSelectedId("")}>
+                  {pageFields.map((field) => (
+                    <div
+                      key={field.id}
+                      className={`pdf-field ${getConfidenceClass(field)} ${field.id === selectedId ? "is-selected" : ""} ${field.tipo === "firma" || field.tipo === "huella" ? "is-image" : ""}`}
+                      style={{
+                        left: field.x * zoom,
+                        top: field.y * zoom,
+                        width: field.w * zoom,
+                        height: field.h * zoom,
+                        fontSize: Math.max(8, field.fontSize * zoom)
+                      }}
+                      onPointerDown={(e) => startDrag(e, field)}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedId(field.id);
+                        if (field.tipo === "texto" || field.tipo === "checkbox") {
+                          setEditingId(field.id);
+                        }
+                      }}
+                      title={`${field.nombre} · confianza ${Math.round(field.confianza * 100)}%`}
+                    >
+                      <span className="field-content">
+                        {editingId === field.id && (field.tipo === "texto" || field.tipo === "checkbox") ? (
+                          <input
+                            autoFocus
+                            className="field-inline-input"
+                            value={field.valor}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onChange={(e) => updateField(field.id, { valor: e.target.value })}
+                            onBlur={() => setEditingId("")}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === "Escape") {
+                                e.preventDefault();
+                                setEditingId("");
+                              }
+                            }}
+                          />
+                        ) : field.tipo === "firma" ? (
+                          <img alt="Firma" src={transparentImages.firma} />
+                        ) : field.tipo === "huella" ? (
+                          <img alt="Huella" src={transparentImages.huella} />
+                        ) : field.tipo === "checkbox" ? (
+                          field.valor || "X"
+                        ) : (
+                          field.valor
+                        )}
+                      </span>
+
+                      {/* Type icon badge */}
+                      {field.tipo === "firma" && <span className="field-type-icon field-type-icon--firma">🖊</span>}
+                      {field.tipo === "huella" && <span className="field-type-icon field-type-icon--huella">🖐</span>}
+                      {field.tipo === "checkbox" && <span className="field-type-icon field-type-icon--check">✓</span>}
+
+                      <button
+                        className="field-resize"
+                        type="button"
+                        aria-label="Redimensionar campo"
+                        onPointerDown={(e) => startResize(e, field)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Download card */}
+          {downloadUrl && (
+            <div className="download-card px-mt-4">
+              <span className="download-card-icon">✅</span>
+              <div className="download-card-body">
+                <div className="download-card-title">{`RELLENADO_${fileName || "formulario.pdf"}`}</div>
+                <div className="download-card-sub">{fields.length} campos completados · Listo para descargar</div>
+              </div>
+              <a className="download-btn" href={downloadUrl} download={`RELLENADO_${fileName || "formulario.pdf"}`}>
+                ⬇️ Descargar
+              </a>
             </div>
           )}
         </div>
 
+        {/* ── Side Panel ─────────────────────────────────────────── */}
         <aside className="side-panel">
+
+          {/* Campos detectados */}
           <section className="px-panel">
             <div className="px-panel__header">
               <div>
-                <h2 className="px-panel__title">Campos rapidos</h2>
-                <p className="px-panel__copy">Selecciona uno y haz doble click en el PDF para repetirlo.</p>
+                <h2 className="px-panel__title">Campos detectados</h2>
+                <p className="px-panel__copy">Haz clic para seleccionar un campo en el PDF.</p>
+              </div>
+              {fields.length > 0 && (
+                <span className="px-chip">{fields.length}</span>
+              )}
+            </div>
+
+            {fields.length === 0 ? (
+              <p className="px-panel__copy">Sin campos. Sube un PDF y usa "Analizar IA".</p>
+            ) : (
+              <div className="field-list">
+                {fields.map((field) => (
+                  <button
+                    key={field.id}
+                    className={`field-card${field.id === selectedId ? " is-active" : ""}`}
+                    onClick={() => {
+                      setSelectedId(field.id);
+                      setPageNum(field.pageNum);
+                    }}
+                    type="button"
+                  >
+                    <span className={`field-card-dot ${getConfidenceDotClass(field)}`} />
+                    <div className="field-card-body">
+                      <span className="field-card-name">{field.nombre}</span>
+                      <span className="field-card-value">
+                        {field.tipo === "firma" ? "imagen: firma" : field.tipo === "huella" ? "imagen: huella" : field.valor || "(vacío)"}
+                      </span>
+                    </div>
+                    <span className={`field-card-badge ${getTypeBadgeClass(field.tipo)}`}>
+                      {getTypeBadgeLabel(field.tipo)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Quick add chips */}
+            <div style={{ marginTop: 14 }}>
+              <p className="modal-section-label" style={{ marginBottom: 8 }}>Agregar campo rápido</p>
+              <div className="quick-chips">
+                {fieldOptions.slice(0, 6).map((opt) => (
+                  <button
+                    key={opt.key}
+                    className={`quick-chip${selectedQuick?.key === opt.key ? " is-active" : ""}`}
+                    type="button"
+                    onClick={() => {
+                      setSelectedQuick(opt);
+                      if (pdfDoc) addField(opt);
+                    }}
+                  >
+                    {opt.type === "firma" ? "🖊" : opt.type === "huella" ? "🖐" : opt.type === "checkbox" ? "✓" : "T"} {opt.label}
+                  </button>
+                ))}
+                <button className="quick-chip" type="button" onClick={() => setShowModal(true)}>
+                  ➕ Más…
+                </button>
               </div>
             </div>
-            <div className="quick-list">
-              {fieldOptions.map((option) => (
-                <button
-                  className={`quick-button ${selectedQuick?.key === option.key ? "is-active" : ""}`}
-                  key={option.key}
-                  type="button"
-                  onClick={() => {
-                    setSelectedQuick(option);
-                    if (pdfDoc) addField(option);
-                  }}
-                >
-                  <strong>{option.label}</strong>
-                  <span>{option.type === "firma" || option.type === "huella" ? "imagen" : option.value || "(vacio)"}</span>
-                </button>
-              ))}
-            </div>
           </section>
 
+          {/* Paginación */}
           <section className="px-panel">
-            <h2 className="px-panel__title">Pagina</h2>
-            <div className="compact-row px-mt-4">
-              <button className="px-btn px-btn--ghost px-btn--sm" disabled={!pdfDoc || pageNum === 0} onClick={() => setPageNum((value) => value - 1)}>
-                Anterior
+            <h2 className="px-panel__title" style={{ marginBottom: 12 }}>Página</h2>
+            <div className="page-nav">
+              <button
+                className="page-nav-btn"
+                disabled={!pdfDoc || pageNum === 0}
+                onClick={() => setPageNum((v) => v - 1)}
+              >
+                ← Anterior
               </button>
-              <span className="px-chip">Pagina {pageNum + 1} de {pdfDoc?.numPages || 0}</span>
-              <button className="px-btn px-btn--ghost px-btn--sm" disabled={!pdfDoc || pageNum >= (pdfDoc?.numPages || 1) - 1} onClick={() => setPageNum((value) => value + 1)}>
-                Siguiente
+              <span className="page-indicator">
+                {pageNum + 1} / {pdfDoc?.numPages || 0}
+              </span>
+              <button
+                className="page-nav-btn"
+                disabled={!pdfDoc || pageNum >= (pdfDoc?.numPages || 1) - 1}
+                onClick={() => setPageNum((v) => v + 1)}
+              >
+                Siguiente →
               </button>
             </div>
           </section>
 
+          {/* Campo seleccionado */}
           <section className="px-panel">
-            <h2 className="px-panel__title">Campo seleccionado</h2>
-            {!selectedField && <p className="px-panel__copy">Selecciona un campo sobre el PDF.</p>}
+            <h2 className="px-panel__title" style={{ marginBottom: 12 }}>Campo seleccionado</h2>
+            {!selectedField && <p className="px-panel__copy">Selecciona un campo sobre el PDF para editarlo.</p>}
             {selectedField && (
-              <div className="px-stack px-mt-4">
-                <div className="edit-toolbar">
-                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={copySelectedField}>
-                    Copiar
-                  </button>
-                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={pasteCopiedField}>
-                    Pegar
-                  </button>
-                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={() => duplicateField(selectedField)}>
-                    Duplicar
-                  </button>
+              <div className="field-editor">
+                <div className="field-editor-actions">
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" title="Copiar campo" onClick={copySelectedField}>📋</button>
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" title="Pegar campo" onClick={pasteCopiedField}>📌</button>
+                  <button className="px-btn px-btn--ghost px-btn--sm" type="button" title="Duplicar campo" onClick={() => duplicateField(selectedField)}>⧉</button>
                   {(selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
-                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={() => setEditingId(selectedField.id)}>
-                      Editar en PDF
-                    </button>
+                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" title="Editar directamente en PDF" onClick={() => setEditingId(selectedField.id)}>✏️ Editar</button>
                   )}
                   {(selectedField.tipo === "texto" || selectedField.tipo === "checkbox") && (
-                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" onClick={autoFitSelectedField}>
-                      Ajustar al texto
-                    </button>
+                    <button className="px-btn px-btn--ghost px-btn--sm" type="button" title="Ajustar al contenido" onClick={autoFitSelectedField}>↔️</button>
                   )}
+                  <button className="px-btn px-btn--sm" type="button" style={{ color: "var(--px-red)", borderColor: "rgba(198,40,40,0.25)", marginLeft: "auto" }} onClick={() => removeField(selectedField.id)}>🗑️</button>
                 </div>
+
                 <label className="px-field">
-                  <span className="px-label">Nombre</span>
-                  <input className="px-input" value={selectedField.nombre} onChange={(event) => updateField(selectedField.id, { nombre: event.target.value })} />
+                  <span className="px-label">Nombre del campo</span>
+                  <input className="px-input" value={selectedField.nombre} onChange={(e) => updateField(selectedField.id, { nombre: e.target.value })} />
                 </label>
+
                 <label className="px-field">
                   <span className="px-label">Valor</span>
-                  <input className="px-input" value={selectedField.valor} onChange={(event) => updateField(selectedField.id, { valor: event.target.value })} />
+                  <input className="px-input" value={selectedField.valor} onChange={(e) => updateField(selectedField.id, { valor: e.target.value })} />
                 </label>
-                <div className="compact-row">
+
+                <div className="field-editor-row">
                   <label className="px-field">
                     <span className="px-label">Fuente</span>
-                    <input className="px-input" type="number" min={6} max={18} value={selectedField.fontSize} onChange={(event) => updateField(selectedField.id, { fontSize: Number(event.target.value) })} />
+                    <input className="px-input" type="number" min={6} max={18} value={selectedField.fontSize} onChange={(e) => updateField(selectedField.id, { fontSize: Number(e.target.value) })} />
                   </label>
                   <label className="px-field">
                     <span className="px-label">Ancho</span>
-                    <input className="px-input" type="number" value={Math.round(selectedField.w)} onChange={(event) => updateField(selectedField.id, { w: Number(event.target.value) })} />
+                    <input className="px-input" type="number" value={Math.round(selectedField.w)} onChange={(e) => updateField(selectedField.id, { w: Number(e.target.value) })} />
                   </label>
                   <label className="px-field">
                     <span className="px-label">Alto</span>
-                    <input className="px-input" type="number" value={Math.round(selectedField.h)} onChange={(event) => updateField(selectedField.id, { h: Number(event.target.value) })} />
+                    <input className="px-input" type="number" value={Math.round(selectedField.h)} onChange={(e) => updateField(selectedField.id, { h: Number(e.target.value) })} />
                   </label>
                 </div>
-                <button className="px-btn px-btn--ghost" type="button" onClick={() => removeField(selectedField.id)}>
-                  Eliminar campo
-                </button>
+
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <span className={`field-card-badge ${getTypeBadgeClass(selectedField.tipo)}`} style={{ padding: "4px 10px", fontSize: "0.75rem" }}>
+                    {getTypeBadgeLabel(selectedField.tipo)}
+                  </span>
+                  <span className="memory-stat">
+                    🎯 {Math.round(selectedField.confianza * 100)}% confianza
+                  </span>
+                </div>
+
+                <p className="px-help">
+                  Flechas: mover · Shift+flechas: mover rápido · Ctrl+C/V: copiar/pegar · Ctrl+D: duplicar · Supr: eliminar
+                  {copiedLabel ? ` · Portapapeles: ${copiedLabel}` : ""}
+                </p>
               </div>
             )}
-            <p className="px-help px-mt-4">
-              Atajos: flechas mueven, Shift+flechas mueve rapido, Ctrl+C copia, Ctrl+V pega, Ctrl+D duplica, Supr elimina.
-              {copiedLabel ? ` Copiado: ${copiedLabel}.` : ""}
-            </p>
           </section>
 
+          {/* Memoria */}
           <section className="px-panel">
-            <h2 className="px-panel__title">Memoria local</h2>
+            <h2 className="px-panel__title" style={{ marginBottom: 8 }}>Memoria local</h2>
             <p className="px-panel__copy">
-              {memory ? `${Object.keys(memory.formulariosConocidos).length} formularios y ${memory.historialCorrecciones.length} correcciones en este navegador.` : "Cargando memoria..."}
+              {memory
+                ? `${Object.keys(memory.formulariosConocidos).length} formularios conocidos · ${memory.historialCorrecciones.length} correcciones guardadas`
+                : "Cargando memoria..."}
             </p>
             <p className="px-help px-mt-4">
-              Al generar, se guardan las coordenadas exactas confirmadas para que el mismo formato vuelva a caer en el mismo punto.
+              Al generar un PDF, se aprenden las coordenadas exactas para que el mismo formulario se rellene perfectamente la próxima vez.
             </p>
-            <button className="px-btn px-btn--ghost px-mt-4" type="button" onClick={() => setMemory(resetMemory())}>
-              Restaurar semilla
+            <button className="px-btn px-btn--ghost px-btn--sm px-mt-4" type="button" onClick={() => { setMemory(resetMemory()); addToast("🔄 Memoria restaurada", "info"); }}>
+              🔄 Restaurar semilla
             </button>
           </section>
 
-          <section className="px-panel">
-            <h2 className="px-panel__title">Como piensa la IA</h2>
-            <p className="px-panel__copy">
-              Mira cada pagina como imagen, busca lineas, espacios, checks, firma y huella. Luego compara el nombre del campo
-              con los datos de Provexpress, aplica memoria local y deja todo editable para que lo ajustes.
-            </p>
-          </section>
         </aside>
       </section>
+
+      {/* ── Modal: Agregar campo ───────────────────────────────────── */}
+      {showModal && (
+        <div className="modal-backdrop" onClick={(e) => { if (e.target === e.currentTarget) setShowModal(false); }}>
+          <div className="modal" role="dialog" aria-modal="true" aria-label="Agregar campo">
+            <div className="modal-header">
+              <h2 className="modal-title">➕ Agregar campo</h2>
+              <button className="modal-close" type="button" onClick={() => setShowModal(false)} aria-label="Cerrar">✕</button>
+            </div>
+            <div className="modal-body">
+              <p className="modal-section-label">Campos predefinidos</p>
+              <div className="modal-grid">
+                {fieldOptions.map((opt) => (
+                  <button
+                    key={opt.key}
+                    className="modal-field-btn"
+                    type="button"
+                    onClick={() => {
+                      setSelectedQuick(opt);
+                      if (pdfDoc) addField(opt);
+                      setShowModal(false);
+                    }}
+                  >
+                    <span className="modal-field-name">
+                      {opt.type === "firma" ? "🖊 " : opt.type === "huella" ? "🖐 " : opt.type === "checkbox" ? "✓ " : "T "}
+                      {opt.label}
+                    </span>
+                    <span className="modal-field-value">
+                      {opt.type === "firma" || opt.type === "huella" ? "imagen" : opt.value || "(vacío)"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="modal-divider" />
+
+              <p className="modal-section-label">Campo personalizado</p>
+              <div style={{ display: "grid", gap: 10 }}>
+                <label className="px-field">
+                  <span className="px-label">Nombre del campo</span>
+                  <input
+                    className="px-input"
+                    placeholder="Ej: Número de contrato"
+                    value={customFieldName}
+                    onChange={(e) => setCustomFieldName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addCustomField()}
+                  />
+                </label>
+                <label className="px-field">
+                  <span className="px-label">Valor</span>
+                  <input
+                    className="px-input"
+                    placeholder="Ej: CT-2025-001"
+                    value={customFieldValue}
+                    onChange={(e) => setCustomFieldValue(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addCustomField()}
+                  />
+                </label>
+                <button
+                  className="px-btn px-btn--primary"
+                  type="button"
+                  disabled={!customFieldName.trim() || !pdfDoc}
+                  onClick={addCustomField}
+                  style={{ justifyContent: "center" }}
+                >
+                  Agregar campo al PDF
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Toast Notifications ────────────────────────────────────── */}
+      <div className="toast-container" aria-live="polite">
+        {toasts.map((toast) => (
+          <div key={toast.id} className="toast" role="status">
+            <span className="toast-icon">{toastIcon(toast.type)}</span>
+            <span className="toast-msg">{toast.message}</span>
+          </div>
+        ))}
+      </div>
+
     </main>
   );
 }
