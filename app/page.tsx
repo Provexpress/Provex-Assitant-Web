@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { autocompleteFields } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
 import { applyMemoryOffsets, detectCode, learnFromConfirmation, loadMemory, resetMemory } from "../lib/memory";
+import { extractPageStructure, type PageStructure } from "../lib/pdfTextExtract";
 import type { FieldOption, FieldType, LocalMemory, PdfField } from "../lib/types";
 
 declare global {
@@ -556,38 +557,63 @@ export default function Home() {
   }
 
   async function analyzeDocument(pdfDocument: PdfJsDocument, memoryOverride: LocalMemory | null = memory) {
-    setStatus("Analizando con IA...");
+    setStatus("Extrayendo estructura del PDF...");
     const detected: PdfField[] = [];
     const activeMemory = memoryOverride || memory;
 
     for (let index = 0; index < pdfDocument.numPages; index += 1) {
-      const page = await pdfDocument.getPage(index + 1);
-      const viewport = page.getViewport({ scale: 2 });
-      const canvas = document.createElement("canvas");
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      const context = canvas.getContext("2d");
-      if (!context) continue;
-      await page.render({ canvasContext: context, viewport }).promise;
+      setStatus(`Analizando pagina ${index + 1}/${pdfDocument.numPages}...`);
+      const pageStruct: PageStructure = await extractPageStructure(pdfDocument, index);
+      let campos: Array<Record<string, unknown>> = [];
 
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          imageDataUrl: canvas.toDataURL("image/png"),
-          contractorData,
-          memoryHints: activeMemory ? memoryHints(activeMemory) : "",
-          pageNumber: index + 1,
-          pageWidth: page.getViewport({ scale: 1 }).width,
-          pageHeight: page.getViewport({ scale: 1 }).height
-        })
-      });
+      if (pageStruct.hasEnoughText) {
+        setStatus(`Pagina ${index + 1}: usando analisis por texto (${pageStruct.emptyZones.length} zonas detectadas)...`);
 
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "La IA fallo");
-      const campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+        const response = await fetch("/api/analyze-text", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            structuredText: pageStruct.structuredText,
+            contractorData,
+            memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+            emptyZones: pageStruct.emptyZones
+          })
+        });
+
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Analisis de texto fallo");
+        campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+      } else {
+        setStatus(`Pagina ${index + 1}: PDF sin texto suficiente, usando Vision...`);
+
+        const page = await pdfDocument.getPage(index + 1);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const context = canvas.getContext("2d");
+        if (!context) continue;
+        await page.render({ canvasContext: context, viewport }).promise;
+
+        const response = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            imageDataUrl: canvas.toDataURL("image/png"),
+            contractorData,
+            memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+            pageNumber: index + 1,
+            pageWidth: pageStruct.width,
+            pageHeight: pageStruct.height
+          })
+        });
+
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Vision fallo");
+        campos = Array.isArray(payload.result?.campos) ? payload.result.campos : [];
+      }
+
       detected.push(...campos.map((field: Record<string, unknown>, fieldIndex: number) => normalizeAiField(field, index, fieldIndex)));
-      setStatus(`IA analizo ${index + 1}/${pdfDocument.numPages} paginas...`);
     }
 
     const completedFields = autocompleteFields(detected, contractorData);
