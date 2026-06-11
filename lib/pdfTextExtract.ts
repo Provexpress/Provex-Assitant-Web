@@ -15,6 +15,8 @@ export type EmptyZone = {
   h: number;
   fontSize: number;
   context: string;
+  /** Texto impreso que hay encima/izquierda del campo (para que la IA entienda mejor) */
+  labelContext?: string;
 };
 
 export type PageStructure = {
@@ -94,23 +96,32 @@ export async function extractPageStructure(pdfDoc: PdfDocumentLike, pageIndex: n
   };
 }
 
+// ── Helpers de búsqueda en línea ──────────────────────────────────
+
 function findPreviousInLine(items: TextItem[], target: TextItem): TextItem | undefined {
   return items
-    .filter((item) => Math.abs(item.y - target.y) < 5 && item.x < target.x)
+    .filter((item) => Math.abs(item.y - target.y) < 6 && item.x < target.x)
     .sort((a, b) => b.x - a.x)[0];
 }
 
 function findNextInLine(items: TextItem[], target: TextItem, startX: number): TextItem | undefined {
   return items
-    .filter((item) => Math.abs(item.y - target.y) < 5 && item.x > startX + 5 && item !== target)
+    .filter((item) => Math.abs(item.y - target.y) < 6 && item.x > startX + 5 && item !== target)
     .sort((a, b) => a.x - b.x)[0];
+}
+
+/** Encuentra el ítem de texto más cercano que está arriba de un punto dado */
+function findLabelAbove(items: TextItem[], x: number, y: number, rangeY = 30): TextItem | undefined {
+  return items
+    .filter((item) => item.y < y && item.y > y - rangeY && Math.abs(item.x - x) < 80)
+    .sort((a, b) => b.y - a.y)[0];
 }
 
 function addZone(zones: EmptyZone[], zone: EmptyZone): void {
   const duplicate = zones.some(
     (current) =>
-      Math.abs(current.x - zone.x) < 5 &&
-      Math.abs(current.y - zone.y) < 5 &&
+      Math.abs(current.x - zone.x) < 8 &&
+      Math.abs(current.y - zone.y) < 8 &&
       current.context === zone.context
   );
   if (!duplicate && zone.w >= 12 && zone.h >= 8) {
@@ -118,85 +129,211 @@ function addZone(zones: EmptyZone[], zone: EmptyZone): void {
   }
 }
 
+// ── Detectores de patrones ────────────────────────────────────────
+
+/** "Yo, ___" → representante legal */
+function detectYoPattern(text: string): boolean {
+  return /^yo,?\s*$/i.test(text.trim()) || /^yo\s+\w/i.test(text.trim());
+}
+
+/** "identificado/a con C.C./NIT No. ___" */
+function detectIdWithPattern(text: string): "documento_identidad" | "nit" | null {
+  if (/identificad[oa]\s+(con\s+)?(c\.?c\.?|cedula)/i.test(text)) return "documento_identidad";
+  if (/identificad[oa]\s+(con\s+)?nit/i.test(text)) return "nit";
+  return null;
+}
+
+/** "en representación de: ___" → razón social */
+function detectEnRepresentacionDe(text: string): boolean {
+  return /en\s+representaci[oó]n\s+de/i.test(text);
+}
+
+/** Detecta checkboxes tipo [ ] o ( ) en el texto */
+function detectCheckboxMarkers(text: string): boolean {
+  return /\[\s*\]|\(\s*\)|\□/.test(text);
+}
+
+// ── Detección principal de zonas vacías ──────────────────────────
+
 function detectEmptyZones(items: TextItem[], pageWidth: number, pageHeight: number): EmptyZone[] {
   const zones: EmptyZone[] = [];
 
   for (const item of items) {
-    const text = item.str;
-    const lower = text.toLowerCase().trim();
+    const text = item.str.trim();
+    const lower = text.toLowerCase();
 
+    // ── 1. Etiqueta seguida de ":" ─────────────────────────────
     if (text.endsWith(":") || text.endsWith(": ")) {
       const labelEnd = item.x + item.w;
       const nextInLine = findNextInLine(items, item, labelEnd);
-      const zoneEnd = nextInLine ? nextInLine.x - 2 : pageWidth - 40;
-      if (zoneEnd - labelEnd > 30) {
+      const zoneEnd = nextInLine ? nextInLine.x - 2 : pageWidth - 30;
+
+      if (zoneEnd - labelEnd > 20) {
+        const cleanLabel = text.replace(/:?\s*$/, "").trim();
         addZone(zones, {
-          label: text.replace(/:?\s*$/, ""),
+          label: cleanLabel,
           x: Math.round(labelEnd + 4),
           y: Math.round(item.y),
           w: Math.round(zoneEnd - labelEnd - 4),
           h: Math.round(item.h + 4),
           fontSize: item.fontSize,
-          context: `after_label:${text}`
+          context: `after_label:${cleanLabel}`,
+          labelContext: cleanLabel
         });
       }
     }
 
+    // ── 2. Líneas de subrayado ___ --- ... ────────────────────
     if (/_{3,}|-{6,}|\.{6,}/.test(text)) {
       const prevItem = findPreviousInLine(items, item);
+      const labelAbove = !prevItem ? findLabelAbove(items, item.x, item.y) : undefined;
+      const label = prevItem
+        ? prevItem.str.replace(/:?\s*$/, "").trim()
+        : (labelAbove?.str.replace(/:?\s*$/, "").trim() || "Campo");
+
       addZone(zones, {
-        label: prevItem ? prevItem.str.replace(/:?\s*$/, "") : "Campo",
+        label,
         x: Math.round(item.x),
         y: Math.round(item.y),
-        w: Math.round(Math.max(item.w, 100)),
+        w: Math.round(Math.max(item.w, 80)),
         h: Math.round(item.h + 4),
         fontSize: item.fontSize,
-        context: `underline:${prevItem?.str || "unknown"}`
+        context: `underline:${label}`,
+        labelContext: label
       });
     }
 
+    // ── 3. Patrón "Yo, ___" → representante legal ─────────────
+    if (detectYoPattern(text)) {
+      const afterX = item.x + item.w;
+      const nextInLine = findNextInLine(items, item, afterX);
+      const zoneEnd = nextInLine ? nextInLine.x - 2 : pageWidth - 30;
+      if (zoneEnd - afterX > 30) {
+        addZone(zones, {
+          label: "Representante Legal",
+          x: Math.round(afterX + 4),
+          y: Math.round(item.y),
+          w: Math.round(zoneEnd - afterX - 4),
+          h: Math.round(item.h + 4),
+          fontSize: item.fontSize,
+          context: "yo_patron:representante_legal",
+          labelContext: "Yo,"
+        });
+      }
+    }
+
+    // ── 4. "identificado/a con C.C./NIT No. ___" ─────────────
+    const idMatch = detectIdWithPattern(text);
+    if (idMatch) {
+      // Buscar el campo vacío después del "No." o al final
+      const afterNoMatch = text.match(/no\.?\s*$/i);
+      const afterX = afterNoMatch
+        ? item.x + item.w
+        : item.x + item.w + 4;
+      const nextInLine = findNextInLine(items, item, afterX);
+      const zoneEnd = nextInLine ? nextInLine.x - 2 : pageWidth - 30;
+      if (zoneEnd - afterX > 20) {
+        addZone(zones, {
+          label: idMatch === "documento_identidad" ? "C.C." : "NIT",
+          x: Math.round(afterX + 2),
+          y: Math.round(item.y),
+          w: Math.round(Math.min(zoneEnd - afterX - 2, 150)),
+          h: Math.round(item.h + 4),
+          fontSize: item.fontSize,
+          context: `id_patron:${idMatch}`,
+          labelContext: text
+        });
+      }
+    }
+
+    // ── 5. "en representación de:" → razón social ─────────────
+    if (detectEnRepresentacionDe(text)) {
+      const afterX = item.x + item.w;
+      const nextInLine = findNextInLine(items, item, afterX);
+      const zoneEnd = nextInLine ? nextInLine.x - 2 : pageWidth - 30;
+      if (zoneEnd - afterX > 30) {
+        addZone(zones, {
+          label: "Razon Social",
+          x: Math.round(afterX + 4),
+          y: Math.round(item.y),
+          w: Math.round(zoneEnd - afterX - 4),
+          h: Math.round(item.h + 4),
+          fontSize: item.fontSize,
+          context: "representacion_de:razon_social",
+          labelContext: "en representación de"
+        });
+      }
+    }
+
+    // ── 6. Checkboxes Si / No ─────────────────────────────────
     if ((lower === "si" || lower === "sí" || lower === "no") && item.w < 30) {
       addZone(zones, {
         label: `Checkbox ${text}`,
         x: Math.round(item.x + item.w + 2),
         y: Math.round(item.y),
-        w: 20,
+        w: 18,
         h: Math.round(item.h),
         fontSize: item.fontSize,
-        context: `checkbox:${text}`
+        context: `checkbox:${text}`,
+        labelContext: text
+      });
+    }
+
+    // ── 7. Markers de checkbox [ ] ( ) □ ──────────────────────
+    if (detectCheckboxMarkers(text)) {
+      const prevItem = findPreviousInLine(items, item);
+      addZone(zones, {
+        label: prevItem ? `Checkbox ${prevItem.str.replace(/:?\s*$/, "").trim()}` : "Checkbox",
+        x: Math.round(item.x + 2),
+        y: Math.round(item.y + 1),
+        w: Math.round(Math.min(item.w - 4, 16)),
+        h: Math.round(item.h - 2),
+        fontSize: item.fontSize,
+        context: `checkbox_marker:${prevItem?.str || "unknown"}`,
+        labelContext: prevItem?.str || ""
       });
     }
   }
 
-  const bottomItems = items.filter((item) => item.y > pageHeight * 0.7);
-  const firmaItem = bottomItems.find((item) => /firma|sign/i.test(item.str));
-  if (firmaItem) {
+  // ── 8. Zona de firma (60%+ de la página) ──────────────────────
+  const firmaThreshold = pageHeight * 0.60;
+  const firmaItems = items.filter(
+    (item) => item.y > firmaThreshold && /firma|sign|suscri/i.test(item.str)
+  );
+  for (const firmaItem of firmaItems) {
     addZone(zones, {
       label: "Firma",
       x: Math.round(firmaItem.x),
-      y: Math.round(Math.max(0, firmaItem.y - 40)),
+      y: Math.round(Math.max(0, firmaItem.y - 42)),
       w: 120,
       h: 40,
       fontSize: 9,
-      context: "firma_zone"
+      context: `firma_zone:${Math.round(firmaItem.y)}`,
+      labelContext: firmaItem.str
     });
   }
 
-  const huellaItem = bottomItems.find((item) => /huella/i.test(item.str));
-  if (huellaItem) {
+  // ── 9. Zona de huella (60%+ de la página) ─────────────────────
+  const huellaItems = items.filter(
+    (item) => item.y > pageHeight * 0.60 && /huella|dactilar/i.test(item.str)
+  );
+  for (const huellaItem of huellaItems) {
     addZone(zones, {
       label: "Huella",
       x: Math.round(huellaItem.x),
-      y: Math.round(Math.max(0, huellaItem.y - 80)),
+      y: Math.round(Math.max(0, huellaItem.y - 82)),
       w: 60,
       h: 80,
       fontSize: 9,
-      context: "huella_zone"
+      context: `huella_zone:${Math.round(huellaItem.y)}`,
+      labelContext: huellaItem.str
     });
   }
 
   return zones;
 }
+
+// ── Agrupación de líneas ──────────────────────────────────────────
 
 function groupLines(items: TextItem[]): TextItem[][] {
   const lineGroups: TextItem[][] = [];
@@ -217,24 +354,37 @@ function groupLines(items: TextItem[]): TextItem[][] {
   return lineGroups;
 }
 
+// ── Texto estructurado para la IA ────────────────────────────────
+
 function buildStructuredText(items: TextItem[], zones: EmptyZone[], pageWidth: number, pageHeight: number): string {
   const lines: string[] = [];
+  const lineGroups = groupLines(items);
+
   lines.push(`PAGINA: ${Math.round(pageWidth)}x${Math.round(pageHeight)} puntos`);
   lines.push("");
-  lines.push("TEXTO ENCONTRADO:");
+  lines.push("=== TEXTO ENCONTRADO (posiciones exactas del PDF) ===");
 
-  for (const group of groupLines(items)) {
+  for (const group of lineGroups) {
     const y = group[0].y;
-    const lineText = group.map((item) => `"${item.str}" (x:${item.x}, w:${item.w})`).join(" | ");
+    const lineText = group
+      .map((item) => `"${item.str}" (x:${item.x}, w:${item.w}, fs:${item.fontSize})`)
+      .join(" | ");
     lines.push(`  Y=${Math.round(y)}: ${lineText}`);
   }
 
   lines.push("");
-  lines.push("ZONAS VACIAS DETECTADAS (para rellenar):");
+  lines.push("=== ZONAS VACIAS DETECTADAS (coordenadas exactas para rellenar) ===");
+  lines.push("IMPORTANTE: Usa estas coordenadas x/y directamente. No las inventes.");
+
   for (const zone of zones) {
+    const ctx = zone.labelContext ? ` [etiqueta: "${zone.labelContext}"]` : "";
     lines.push(
-      `  - "${zone.label}" -> posicion x:${zone.x} y:${zone.y} ancho:${zone.w} alto:${zone.h} font:${zone.fontSize} contexto:${zone.context}`
+      `  ZONA "${zone.label}"${ctx}: x=${zone.x} y=${zone.y} w=${zone.w} h=${zone.h} fs=${zone.fontSize} ctx=${zone.context}`
     );
+  }
+
+  if (zones.length === 0) {
+    lines.push("  (sin zonas detectadas - usar Vision para este PDF)");
   }
 
   return lines.join("\n");

@@ -1,7 +1,13 @@
+import { normalize } from "./autocomplete";
 import { LEGACY_MEMORY_SEED } from "./memorySeed";
-import type { LocalMemory, PdfField } from "./types";
+import type { ContractorData, FormularioConocido, LocalMemory, PdfField } from "./types";
 
 const STORAGE_KEY = "provex-assitant-web-memory-v1";
+
+/** Umbral de veces procesado para considerar un formulario "aprendido" */
+const LEARNED_THRESHOLD = 3;
+
+// ── Conversión de semilla legacy ──────────────────────────────────
 
 function legacyToLocalMemory(): LocalMemory {
   const legacy = LEGACY_MEMORY_SEED as unknown as {
@@ -39,9 +45,13 @@ function legacyToLocalMemory(): LocalMemory {
         });
       }
     }
+
+    const vecesProcesado = Number(form.veces_procesado || 0);
     formulariosConocidos[code] = {
       fields,
-      vecesProcesado: Number(form.veces_procesado || 0)
+      vecesProcesado,
+      aprendido: vecesProcesado >= LEARNED_THRESHOLD,
+      ultimaVez: new Date().toISOString().slice(0, 10)
     };
   }
 
@@ -67,6 +77,8 @@ function legacyToLocalMemory(): LocalMemory {
     })
   };
 }
+
+// ── Carga y persistencia ──────────────────────────────────────────
 
 export function loadMemory(): LocalMemory {
   if (typeof window === "undefined") {
@@ -100,70 +112,7 @@ export function resetMemory(): LocalMemory {
   return seeded;
 }
 
-function savedField(field: PdfField): PdfField {
-  return {
-    ...field,
-    source: "memoria",
-    confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
-    iaX: field.x,
-    iaY: field.y,
-    suggestedX: field.x,
-    suggestedY: field.y
-  };
-}
-
-export function learnFromConfirmation(memory: LocalMemory, memoryKey: string, fields: PdfField[], aliases: string[] = []): LocalMemory {
-  const next: LocalMemory = structuredClone(memory);
-  const code = detectCode(memoryKey);
-  const keys = Array.from(new Set([code, ...aliases.map((alias) => detectCode(alias))].filter(Boolean)));
-  const confirmedFields = fields.map(savedField);
-
-  for (const key of keys) {
-    next.formulariosConocidos[key] = {
-      fields: confirmedFields,
-      vecesProcesado: (next.formulariosConocidos[key]?.vecesProcesado || 0) + 1
-    };
-  }
-
-  for (const field of fields) {
-    const baseX = Number(field.suggestedX ?? field.iaX ?? field.x);
-    const baseY = Number(field.suggestedY ?? field.iaY ?? field.y);
-    const dx = Number(field.x || 0) - baseX;
-    const dy = Number(field.y || 0) - baseY;
-    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-      next.historialCorrecciones.push({
-        fecha: new Date().toISOString().slice(0, 10),
-        pdf: memoryKey,
-        campo: field.nombre,
-        dx,
-        dy
-      });
-      const contexto = fieldContext(field);
-      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
-      if (pattern) {
-        const count = Math.max(0, pattern.vecesCorregido || 0);
-        pattern.offsetX = (pattern.offsetX * count + dx) / (count + 1);
-        pattern.offsetY = (pattern.offsetY * count + dy) / (count + 1);
-        pattern.vecesCorregido = count + 1;
-      } else {
-        next.patronesGlobales.push({
-          contexto,
-          offsetX: dx,
-          offsetY: dy,
-          vecesAplicado: 0,
-          vecesCorregido: 1
-        });
-      }
-    } else {
-      const contexto = fieldContext(field);
-      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
-      if (pattern) pattern.vecesAplicado = (pattern.vecesAplicado || 0) + 1;
-    }
-  }
-
-  saveMemory(next);
-  return next;
-}
+// ── Detección de código de formulario ────────────────────────────
 
 export function detectCode(fileName: string): string {
   const input = String(fileName || "");
@@ -204,18 +153,228 @@ function normalizeFormCode(code: string): string {
   return raw;
 }
 
-function normalize(value: unknown): string {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
+// ── Estado de aprendizaje ─────────────────────────────────────────
+
+/**
+ * Retorna true si el formulario fue procesado >= LEARNED_THRESHOLD veces
+ * Y fue marcado como aprendido (sin correcciones recientes que lo invaliden).
+ * Cuando es true, el llamador puede saltarse la IA y usar la memoria directamente.
+ */
+export function isLearned(memory: LocalMemory, key: string): boolean {
+  const form = memory.formulariosConocidos[key];
+  if (!form) return false;
+  return Boolean(form.aprendido) && (form.fields?.length ?? 0) > 0;
+}
+
+// ── Generación de hints para la IA ───────────────────────────────
+
+/**
+ * Genera hasta 8 hints de memoria para enviar a la IA como contexto.
+ * Incluye correcciones históricas con etiqueta y offsets de patrones globales.
+ */
+export function memoryHints(memory: LocalMemory): string {
+  const lines: string[] = [];
+
+  // Top correcciones con etiqueta
+  const topCorrections = memory.historialCorrecciones
+    .filter((c) => Math.abs(c.dx) > 0.5 || Math.abs(c.dy) > 0.5)
+    .slice(-12);
+
+  if (topCorrections.length > 0) {
+    lines.push("Correcciones históricas recientes:");
+    for (const c of topCorrections) {
+      const label = c.etiqueta ? `"${c.etiqueta}"` : `"${c.campo}"`;
+      lines.push(`  - Campo ${label}: mover X ${c.dx.toFixed(1)}, Y ${c.dy.toFixed(1)}`);
+    }
+  }
+
+  // Patrones globales más aplicados
+  const topPatterns = memory.patronesGlobales
+    .filter((p) => (p.vecesAplicado + p.vecesCorregido) > 1)
+    .sort((a, b) => (b.vecesAplicado + b.vecesCorregido) - (a.vecesAplicado + a.vecesCorregido))
+    .slice(0, 6);
+
+  if (topPatterns.length > 0) {
+    lines.push("Patrones de posición aprendidos:");
+    for (const p of topPatterns) {
+      lines.push(`  - ${p.contexto}: offset X ${p.offsetX.toFixed(1)}, Y ${p.offsetY.toFixed(1)}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n") : "Sin memoria histórica relevante.";
+}
+
+// ── Aprendizaje desde confirmación ───────────────────────────────
+
+function savedField(field: PdfField): PdfField {
+  return {
+    ...field,
+    source: "memoria",
+    confianza: Math.min(0.99, Math.max(0.92, field.confianza + 0.08)),
+    iaX: field.x,
+    iaY: field.y,
+    suggestedX: field.x,
+    suggestedY: field.y
+  };
 }
 
 function fieldContext(field: PdfField): string {
   return `${field.tipo}:${normalize(field.nombre)}`;
 }
+
+export function learnFromConfirmation(
+  memory: LocalMemory,
+  memoryKey: string,
+  fields: PdfField[],
+  aliases: string[] = []
+): LocalMemory {
+  const next: LocalMemory = structuredClone(memory);
+  const code = detectCode(memoryKey);
+  const keys = Array.from(new Set([code, ...aliases.map((alias) => detectCode(alias))].filter(Boolean)));
+  const confirmedFields = fields.map(savedField);
+
+  for (const key of keys) {
+    const prevVeces = next.formulariosConocidos[key]?.vecesProcesado || 0;
+    const nuevasVeces = prevVeces + 1;
+    const formulario: FormularioConocido = {
+      fields: confirmedFields,
+      vecesProcesado: nuevasVeces,
+      aprendido: nuevasVeces >= LEARNED_THRESHOLD,
+      ultimaVez: new Date().toISOString().slice(0, 10)
+    };
+    next.formulariosConocidos[key] = formulario;
+  }
+
+  for (const field of fields) {
+    const baseX = Number(field.suggestedX ?? field.iaX ?? field.x);
+    const baseY = Number(field.suggestedY ?? field.iaY ?? field.y);
+    const dx = Number(field.x || 0) - baseX;
+    const dy = Number(field.y || 0) - baseY;
+
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+      next.historialCorrecciones.push({
+        fecha: new Date().toISOString().slice(0, 10),
+        pdf: memoryKey,
+        campo: field.nombre,
+        dx,
+        dy,
+        etiqueta: field.nombre,
+        contexto: fieldContext(field)
+      });
+
+      // Actualizar patrón global
+      const contexto = fieldContext(field);
+      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
+      if (pattern) {
+        const count = Math.max(0, pattern.vecesCorregido || 0);
+        pattern.offsetX = (pattern.offsetX * count + dx) / (count + 1);
+        pattern.offsetY = (pattern.offsetY * count + dy) / (count + 1);
+        pattern.vecesCorregido = count + 1;
+      } else {
+        next.patronesGlobales.push({
+          contexto,
+          offsetX: dx,
+          offsetY: dy,
+          vecesAplicado: 0,
+          vecesCorregido: 1
+        });
+      }
+    } else {
+      const contexto = fieldContext(field);
+      const pattern = next.patronesGlobales.find((item) => item.contexto === contexto);
+      if (pattern) pattern.vecesAplicado = (pattern.vecesAplicado || 0) + 1;
+    }
+  }
+
+  // Limitar historial a las últimas 200 correcciones
+  if (next.historialCorrecciones.length > 200) {
+    next.historialCorrecciones = next.historialCorrecciones.slice(-200);
+  }
+
+  saveMemory(next);
+  return next;
+}
+
+// ── Entrenamiento desde PDF ya rellenado ──────────────────────────
+
+/**
+ * Analiza campos que ya tienen valores del contratista y los guarda
+ * como memoria exacta con confianza 0.99.
+ *
+ * Proceso:
+ * 1. Para cada campo recibido, verifica si su valor coincide con
+ *    algún dato del contratista (comparación normalizada).
+ * 2. Los campos que coinciden se guardan como "aprendidos".
+ * 3. Retorna { memory actualizada, camposAprendidos count }.
+ */
+export function trainFromFilledPdf(
+  memory: LocalMemory,
+  memoryKey: string,
+  fields: PdfField[],
+  contractorData: ContractorData
+): { memory: LocalMemory; learned: number } {
+  const next: LocalMemory = structuredClone(memory);
+
+  // Construir mapa inverso: valor normalizado → clave del contratista
+  const inverseMap: Map<string, string> = new Map();
+  for (const [key, value] of Object.entries(contractorData)) {
+    if (value && value.length > 2) {
+      inverseMap.set(normalize(value), key);
+    }
+  }
+
+  let learned = 0;
+  const trainedFields: PdfField[] = [];
+
+  for (const field of fields) {
+    const normalizedValue = normalize(field.valor);
+    if (!normalizedValue || normalizedValue.length < 2) {
+      trainedFields.push({ ...field, source: "memoria", confianza: 0.5 });
+      continue;
+    }
+
+    // Buscar coincidencia exacta o parcial con datos del contratista
+    let matchedKey: string | undefined;
+    for (const [val, key] of inverseMap) {
+      if (normalizedValue === val || (val.length > 4 && normalizedValue.includes(val))) {
+        matchedKey = key;
+        break;
+      }
+    }
+
+    if (matchedKey) {
+      learned++;
+      trainedFields.push({
+        ...field,
+        source: "memoria",
+        confianza: 0.99,
+        campoCsv: matchedKey,
+        iaX: field.x,
+        iaY: field.y,
+        suggestedX: field.x,
+        suggestedY: field.y
+      });
+    } else {
+      trainedFields.push({ ...field, source: "memoria", confianza: 0.75 });
+    }
+  }
+
+  const code = detectCode(memoryKey);
+  if (code) {
+    const prevVeces = next.formulariosConocidos[code]?.vecesProcesado || 0;
+    next.formulariosConocidos[code] = {
+      fields: trainedFields,
+      vecesProcesado: Math.max(prevVeces, LEARNED_THRESHOLD), // Contar como ya aprendido
+      aprendido: true,
+      ultimaVez: new Date().toISOString().slice(0, 10)
+    };
+  }
+
+  saveMemory(next);
+  return { memory: next, learned };
+}
+
+// ── Aplicar offsets de memoria ────────────────────────────────────
 
 export function applyMemoryOffsets(memory: LocalMemory, fields: PdfField[]): PdfField[] {
   return fields.map((field) => {

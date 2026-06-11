@@ -44,69 +44,74 @@ function clientConfig(): { client: OpenAI; model: string; provider: string } {
   };
 }
 
-const systemPrompt = `Eres Provex Assistant, un motor especializado en diligenciar formularios PDF empresariales colombianos.
+const systemPrompt = `Eres Provex Assistant, motor especializado en diligenciar formularios PDF empresariales colombianos de la empresa PROVEXPRESS SAS.
 
-Tu unica salida permitida es un objeto JSON valido. No expliques, no saludes, no uses markdown.
+Tu ÚNICA salida permitida es un objeto JSON válido. Sin explicaciones, sin saludos, sin markdown.
 
-Objetivo:
-- Usar la estructura textual del PDF para detectar campos vacios.
-- Asignar datos reales del contratista.
-- Preferir coordenadas ya detectadas por el extractor antes que inventar nuevas.
+REGLAS ABSOLUTAS:
+1. NUNCA inventes coordenadas x/y. SIEMPRE usa las coordenadas de las ZONAS VACIAS DETECTADAS cuando existan.
+2. Si una zona está detectada, úsala aunque el texto alrededor parezca ambiguo.
+3. No rellenes encima de etiquetas impresas ni de valores ya escritos de otra empresa.
+4. No dupliques campos: si el mismo nombre ya aparece, omite el duplicado.
+5. confianza=0.90 si usas coordenada de zona detectada. confianza=0.55 si añades zona no detectada.
 
-Criterios de calidad:
-- Prioriza precision sobre cantidad.
-- No rellenes encima de etiquetas impresas.
-- No inventes datos.
-- No sobrescribas datos claros de otra empresa o persona.
-- Si dudas de una casilla, dejala sin marcar.
-- Usa nombres de campo humanos y faciles de revisar.`;
+MAPEO DE CAMPOS (aliases → dato del contratista):
+- "TERCERO A EVALUAR", "Nombre empresa", "Razón Social", "En representación de" → razon_social
+- "NIT", "N.I.T.", "Identificación tributaria", "Identificada con NIT" → nit
+- "Representante Legal", "Yo,", "Suscrito", "Nombre completo" → representante_legal
+- "C.C.", "Cédula", "Identificado con cédula", "Documento de identidad" → documento_identidad
+- "Dirección", "Domicilio", "Sede" → direccion
+- "Ciudad" → ciudad
+- "Teléfono", "Tel.", "PBX" → telefono
+- "Correo", "Email", "E-mail" → correo_contacto
+- "Fecha", "Fecha de", "a los días del mes" → fecha
+- "Ciudad y Fecha", "Lugar y Fecha" → ciudad_fecha
+- "Firma" → tipo firma
+- "Huella" → tipo huella
+
+FORMATO DE FECHA: usa siempre dd/mm/aaaa (formato colombiano).
+FORMATO NIT: usa XXX.XXX.XXX-X con puntos y guion.`;
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const structuredText = String(body.structuredText || "");
     const contractorData = body.contractorData || {};
-    const memoryHints = String(body.memoryHints || "Sin memoria historica.");
+    const hints = String(body.memoryHints || "Sin memoria histórica.");
     const emptyZones = Array.isArray(body.emptyZones) ? body.emptyZones : [];
 
     if (!structuredText.trim()) {
-      return NextResponse.json({ error: "Texto estructurado vacio" }, { status: 400 });
+      return NextResponse.json({ error: "Texto estructurado vacío" }, { status: 400 });
     }
 
     const { client, model, provider } = clientConfig();
-    const prompt = `Analiza esta pagina de un formulario PDF empresarial colombiano y devuelve campos editables para rellenarla.
 
-DATOS DEL CONTRATISTA:
+    const prompt = `Analiza este formulario PDF y devuelve los campos a rellenar con datos de PROVEXPRESS SAS.
+
+== DATOS DEL CONTRATISTA ==
 ${JSON.stringify(contractorData, null, 2)}
 
-ESTRUCTURA DE LA PAGINA DEL PDF:
+== ESTRUCTURA EXACTA DE LA PÁGINA ==
 ${structuredText}
 
-ZONAS VACIAS YA DETECTADAS:
+== ZONAS VACÍAS DETECTADAS AUTOMÁTICAMENTE ==
+Estas coordenadas son EXACTAS del PDF. Úsalas directamente.
 ${JSON.stringify(emptyZones, null, 2)}
 
-MEMORIA DE CORRECCIONES ANTERIORES:
-${memoryHints}
+== MEMORIA HISTÓRICA DE CORRECCIONES ==
+${hints}
 
-TAREA:
-1. Para cada zona vacia detectada, asigna el valor correcto de los datos del contratista.
-2. Si detectas campos vacios adicionales que no estan en la lista, agregalos.
-3. Usa coordenadas de la estructura del PDF. No inventes coordenadas si ya hay una zona compatible.
-4. Para checkboxes, marca con "X" solo la opcion correcta.
-5. Para firma y huella, usa tipo "firma" o "huella".
+== TAREA ==
+1. Por cada ZONA VACÍA, asigna el valor correcto del contratista usando el MAPEO DE CAMPOS.
+2. Si detectas zonas adicionales no listadas (p.ej. patrones "Yo,", "identificado con"), agrégalas con confianza 0.55.
+3. Para campos de FECHA: usa el valor "fecha" o "ciudad_fecha" del contratista (formato dd/mm/aaaa).
+4. Para FIRMA: tipo="firma", valor="firma". Para HUELLA: tipo="huella", valor="huella".
+5. Para CHECKBOX: valor="X" solo en la opción correcta según datos del contratista.
+6. NO repitas el mismo campo dos veces.
+7. Si una zona no tiene dato correspondiente en el contratista, omítela.
 
-Formato obligatorio, SOLO JSON valido:
-{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":217,"y":124,"w":160,"h":22,"tipo":"texto","fontsize":9,"confianza":0.85,"source_zone":"after_label:TERCERO A EVALUAR:"}]}
-
-REGLAS:
-- Usa las coordenadas x, y de las zonas detectadas cuando correspondan. Son la esquina superior izquierda del campo editable.
-- Si una zona no tiene dato correspondiente, omitela.
-- Devuelve w/h aproximados del espacio real, no cajas enormes.
-- Ajusta fontsize al formulario: normalmente 7-10. Usa 8 si el espacio es pequeno.
-- tipo solo puede ser texto, checkbox, firma o huella.
-- confianza: 0.85 si usas una zona detectada, 0.6 si agregas una zona no detectada.
-- Si no sabes que dato va, deja valor vacio.
-- No rellenes datos que claramente pertenezcan a otra empresa o persona ya escrita en el PDF.`;
+RESPONDE SOLO CON JSON:
+{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":217,"y":124,"w":160,"h":18,"tipo":"texto","fontsize":9,"confianza":0.90,"source_zone":"after_label:TERCERO A EVALUAR:"}]}`;
 
     const response = await client.chat.completions.create({
       model,

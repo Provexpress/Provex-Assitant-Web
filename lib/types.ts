@@ -21,6 +21,8 @@ export type PdfField = {
   suggestedX?: number;
   suggestedY?: number;
   manualSize?: boolean;
+  /** Texto impreso cercano al campo (etiqueta), para aprendizaje contextual */
+  contextoTexto?: string;
 };
 
 export type FieldOption = {
@@ -28,6 +30,27 @@ export type FieldOption = {
   label: string;
   type: FieldType;
   value: string;
+};
+
+export type HistorialCorreccion = {
+  fecha: string;
+  pdf: string;
+  campo: string;
+  dx: number;
+  dy: number;
+  /** Etiqueta impresa cercana al campo corregido */
+  etiqueta?: string;
+  /** Contexto: tipo + nombre normalizado */
+  contexto?: string;
+};
+
+export type FormularioConocido = {
+  fields: PdfField[];
+  vecesProcesado: number;
+  /** true cuando vecesProcesado >= 3 y sin correcciones recientes → skip IA */
+  aprendido?: boolean;
+  /** Fecha última vez que se procesó */
+  ultimaVez?: string;
 };
 
 export type LocalMemory = {
@@ -39,12 +62,6 @@ export type LocalMemory = {
     vecesAplicado: number;
     vecesCorregido: number;
   }>;
-  formulariosConocidos: Record<string, { fields: PdfField[]; vecesProcesado: number }>;
-  historialCorrecciones: Array<{
-    fecha: string;
-    pdf: string;
-    campo: string;
-    dx: number;
-    dy: number;
-  }>;
+  formulariosConocidos: Record<string, FormularioConocido>;
+  historialCorrecciones: HistorialCorreccion[];
 };

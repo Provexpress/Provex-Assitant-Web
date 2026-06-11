@@ -44,71 +44,75 @@ function clientConfig(): { client: OpenAI; model: string; provider: string } {
   };
 }
 
-const systemPrompt = `Eres Provex Assistant, un motor especializado en diligenciar formularios PDF empresariales colombianos.
+const systemPrompt = `Eres Provex Assistant, motor especializado en diligenciar formularios PDF empresariales colombianos de PROVEXPRESS SAS.
 
-Tu unica salida permitida es un objeto JSON valido. No expliques, no saludes, no uses markdown.
+Tu ÚNICA salida permitida es un objeto JSON válido. Sin explicaciones, sin saludos, sin markdown.
 
-Objetivo:
-- Detectar campos vacios en formularios PDF.
-- Asignar datos reales del contratista.
-- Proponer coordenadas precisas para que el usuario revise y ajuste visualmente.
+REGLAS ABSOLUTAS:
+1. La imagen fue renderizada a 2x. Divide TODOS los píxeles entre 2 para obtener coordenadas PDF reales.
+2. x/y son la esquina SUPERIOR IZQUIERDA del espacio en blanco a rellenar, NO sobre la etiqueta impresa.
+3. No rellenes encima de texto ya impreso ni de valores de otra empresa/persona.
+4. No dupliques campos: cada campo solo una vez.
+5. No inventes valores que no estén en los datos del contratista.
 
-Criterios de calidad:
-- Prioriza precision de ubicacion sobre cantidad de campos.
-- No rellenes encima de etiquetas impresas.
-- No inventes datos.
-- No sobrescribas datos claros de otra empresa o persona.
-- Si dudas de una casilla, dejala sin marcar.
-- Usa nombres de campo humanos y faciles de revisar.`;
+MAPEO DE CAMPOS (etiqueta visible → dato del contratista):
+- "TERCERO A EVALUAR", "Razón Social", "Empresa", "En representación de" → razon_social
+- "NIT", "N.I.T.", "Identificado con NIT" → nit  
+- "Representante Legal", "Yo,", "Nombre completo" → representante_legal
+- "C.C.", "Cédula", "Documento de identidad" → documento_identidad
+- "Dirección", "Domicilio" → direccion
+- "Ciudad" → ciudad
+- "Teléfono", "Tel.", "PBX" → telefono
+- "Correo", "Email" → correo_contacto
+- "Fecha", "Fecha de" → fecha (formato dd/mm/aaaa)
+- "Ciudad y Fecha", "Lugar y Fecha" → ciudad_fecha
+- "Firma" → tipo=firma, valor=firma
+- "Huella" → tipo=huella, valor=huella
+
+FORMATO NIT: XXX.XXX.XXX-X con puntos y guion.
+FORMATO FECHA: dd/mm/aaaa (colombiano).`;
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const imageDataUrl = String(body.imageDataUrl || "");
     const contractorData = body.contractorData || {};
-    const memoryHints = String(body.memoryHints || "Sin memoria historica.");
+    const hints = String(body.memoryHints || "Sin memoria histórica.");
     const pageNumber = Number(body.pageNumber || 1);
     const pageWidth = Number(body.pageWidth || 595);
     const pageHeight = Number(body.pageHeight || 842);
 
     if (!imageDataUrl.startsWith("data:image/png;base64,")) {
-      return NextResponse.json({ error: "Imagen invalida" }, { status: 400 });
+      return NextResponse.json({ error: "Imagen inválida" }, { status: 400 });
     }
 
     const { client, model, provider } = clientConfig();
-    const prompt = `Analiza esta imagen de un formulario PDF empresarial colombiano y devuelve campos editables para rellenarlo.
 
-DATOS DEL CONTRATISTA:
+    const prompt = `Analiza este formulario PDF y devuelve los campos a rellenar con datos de PROVEXPRESS SAS.
+
+== DATOS DEL CONTRATISTA ==
 ${JSON.stringify(contractorData, null, 2)}
 
-MEMORIA HISTORICA:
-${memoryHints}
+== INFORMACIÓN DE LA PÁGINA ==
+- Número: ${pageNumber}
+- Ancho PDF: ${pageWidth} puntos (la imagen es 2x = ${pageWidth * 2}px)
+- Alto PDF: ${pageHeight} puntos (la imagen es 2x = ${pageHeight * 2}px)
 
-PAGINA:
-- Numero: ${pageNumber}
-- Ancho PDF: ${pageWidth} puntos
-- Alto PDF: ${pageHeight} puntos
+== MEMORIA HISTÓRICA ==
+${hints}
 
-Identifica campos vacios: lineas, espacios en blanco, checkboxes, firma y huella. Usa los DATOS DEL CONTRATISTA para proponer el valor correcto.
+== TAREA ==
+1. Identifica campos vacíos: líneas ___, espacios en blanco, checkboxes, zonas de firma/huella.
+2. Asigna el valor correcto según el MAPEO DE CAMPOS.
+3. ⚠️ DIVIDE todos los píxeles de la imagen entre 2 para obtener coordenadas PDF reales.
+4. x/y apuntan al espacio vacío DESPUÉS de la etiqueta, no sobre ella.
+5. Para FIRMA: tipo="firma", valor="firma". Para HUELLA: tipo="huella", valor="huella".
+6. Para CHECKBOX: valor="X" solo en la opción correcta.
+7. NO repitas el mismo campo dos veces.
+8. confianza: 0.70 si ves claramente el espacio, 0.45 si es una suposición.
 
-Formato obligatorio, SOLO JSON valido:
-{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.6}]}
-
-Reglas:
-- Coordenadas en puntos PDF, origen arriba-izquierda.
-- La imagen fue renderizada a 2x, divide pixeles entre 2.
-- x/y son la esquina superior izquierda de la caja editable que se vera sobre el PDF.
-- Escribe donde empieza el espacio vacio o la linea para llenar, no sobre la etiqueta impresa.
-- El texto debe quedar dentro de la linea o espacio disponible.
-- Devuelve w/h aproximados del espacio real, no cajas enormes.
-- Si el valor es muy largo, usa el ancho disponible de la linea; no lo pongas encima de otras palabras.
-- Ajusta fontsize al formulario: normalmente 7-10. Usa 8 si el espacio es pequeno.
-- No agregues campos que ya esten diligenciados con datos claros de otra empresa/persona.
-- No repitas campos.
-- tipo solo puede ser texto, checkbox, firma o huella.
-- Para firma usa tipo firma y valor "firma". Para huella usa tipo huella y valor "huella".
-- Para checkbox usa valor "X" solo en la casilla correcta; si no estas seguro deja valor vacio.
-- Si no sabes el valor, deja valor vacio.`;
+RESPONDE SOLO CON JSON:
+{"campos":[{"nombre":"TERCERO A EVALUAR","valor":"PROVEXPRESS SAS","x":120,"y":95,"tipo":"texto","fontsize":9,"w":160,"h":18,"confianza":0.70}]}`;
 
     const response = await client.chat.completions.create({
       model,

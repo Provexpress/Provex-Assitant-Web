@@ -3,9 +3,9 @@
 import { PublicClientApplication, type AccountInfo } from "@azure/msal-browser";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { autocompleteFields } from "../lib/autocomplete";
+import { autocompleteFields, deduplicateFields } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
-import { applyMemoryOffsets, detectCode, learnFromConfirmation, loadMemory, resetMemory } from "../lib/memory";
+import { applyMemoryOffsets, detectCode, isLearned, learnFromConfirmation, loadMemory, memoryHints, resetMemory, trainFromFilledPdf } from "../lib/memory";
 import { extractPageStructure, type PageStructure } from "../lib/pdfTextExtract";
 import type { FieldOption, FieldType, LocalMemory, PdfField } from "../lib/types";
 
@@ -224,12 +224,7 @@ function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: 
   };
 }
 
-function memoryHints(memory: LocalMemory) {
-  return memory.patronesGlobales
-    .slice(0, 6)
-    .map((pattern) => `- ${pattern.contexto}: mover X ${pattern.offsetX.toFixed(1)}, Y ${pattern.offsetY.toFixed(1)}`)
-    .join("\n");
-}
+// memoryHints is now imported from lib/memory.ts
 
 function fitFontSize(font: { widthOfTextAtSize: (text: string, size: number) => number }, text: string, maxSize: number, maxWidth: number) {
   const safeText = text.replace(/\s+/g, " ").trim();
@@ -534,11 +529,19 @@ export default function Home() {
         })),
         contractorData
       );
-      setFields(autoSizeFields(remembered, firstViewport.width));
-      setStatus(`Usando memoria exacta para ${knownKey}. No se aplicaron promedios ni offsets.`);
-      addToast(`🧠 Memoria cargada — ${remembered.length} campos`, "success");
+      const deduped = deduplicateFields(autoSizeFields(remembered, firstViewport.width));
+      setFields(deduped);
+
+      // Si el formulario está aprendido (3+ veces sin correcciones), no llamar IA
+      if (isLearned(activeMemory, knownKey)) {
+        setStatus(`🤓 Formulario aprendido — ${deduped.length} campos cargados desde memoria. Sin llamada a IA.`);
+        addToast(`🤓 Formulario aprendido — sin IA (${deduped.length} campos)`, "success");
+      } else {
+        setStatus(`Usando memoria para ${knownKey}. ${deduped.length} campos cargados.`);
+        addToast(`🧠 Memoria cargada — ${deduped.length} campos`, "success");
+      }
     } else {
-      setStatus("PDF cargado. Analizando automaticamente con IA...");
+      setStatus("PDF cargado. Analizando automáticamente con IA...");
       try {
         await analyzeDocument(document, activeMemory);
       } catch (error) {
@@ -815,9 +818,13 @@ export default function Home() {
 
       const completedFields = autocompleteFields(detected, contractorData);
       const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
-      setFields(autoSizeFields(adjustedFields, pageSize.width));
-      setStatus(`IA detecto ${detected.length} campos. Ajustalos sobre el PDF.`);
-      addToast(`🤖 IA detectó ${detected.length} campos`, "success");
+      // Deduplicar antes de mostrar
+      const deduped = deduplicateFields(autoSizeFields(adjustedFields, pageSize.width));
+      const removedCount = adjustedFields.length - deduped.length;
+      setFields(deduped);
+      const dedupeMsg = removedCount > 0 ? ` (${removedCount} duplicados eliminados)` : "";
+      setStatus(`IA detectó ${deduped.length} campos${dedupeMsg}. Ajústalos sobre el PDF.`);
+      addToast(`🤖 IA detectó ${deduped.length} campos${dedupeMsg}`, "success");
     } finally {
       setIsAnalyzing(false);
     }
@@ -830,6 +837,63 @@ export default function Home() {
     } catch (error) {
       setStatus(error instanceof Error ? `La IA no pudo analizar: ${error.message}` : "La IA no pudo analizar el PDF.");
       addToast("Error al analizar con IA", "error");
+    }
+  }
+
+  // ── Entrenamiento desde PDF ya rellenado ────────────────────────
+  async function handleTrainPdf(file: File) {
+    if (!file) return;
+    addToast("📚 Procesando PDF de entrenamiento...", "info");
+    setStatus("Entrenando con PDF ya rellenado...");
+
+    try {
+      const bytes = await file.arrayBuffer();
+      const pdfjs = await loadPdfJs();
+      const document = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+      const activeMemory = memory || loadMemory();
+      const pdfText = await extractPdfText(document);
+      const contentCode = detectCode(`${file.name}\n${pdfText}`);
+      const fileCode = detectCode(file.name);
+      const trainingKey = contentCode || fileCode;
+
+      // Extraer todos los campos de texto detectados en las páginas
+      const allFields: import("../lib/types").PdfField[] = [];
+      for (let index = 0; index < document.numPages; index++) {
+        const pageStruct = await extractPageStructure(document, index);
+        for (const zone of pageStruct.emptyZones) {
+          // Para entrenamiento, buscamos el texto que ESTÁ en el PDF (ya rellenado)
+          // En el contexto del entrenamiento, la zona ya tiene valor en el PDF real
+          allFields.push({
+            id: `train_${index}_${allFields.length}`,
+            pageNum: index,
+            nombre: zone.label,
+            valor: zone.labelContext || zone.label,
+            tipo: "texto",
+            x: zone.x,
+            y: zone.y,
+            w: zone.w,
+            h: zone.h,
+            fontSize: zone.fontSize,
+            confianza: 0.75,
+            source: "ia",
+            contextoTexto: zone.context
+          });
+        }
+      }
+
+      const { memory: updatedMemory, learned } = trainFromFilledPdf(
+        activeMemory,
+        trainingKey,
+        allFields,
+        contractorData
+      );
+      setMemory(updatedMemory);
+      setStatus(`✅ Entrenamiento completado: ${learned} campos aprendidos para "${trainingKey}".`);
+      addToast(`🎓 ${learned} campos aprendidos desde "${file.name}"`, "success");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Error desconocido";
+      setStatus(`Error en entrenamiento: ${msg}`);
+      addToast("Error al entrenar con PDF", "error");
     }
   }
 
@@ -1404,6 +1468,35 @@ export default function Home() {
             <button className="px-btn px-btn--ghost px-btn--sm px-mt-4" type="button" onClick={() => { setMemory(resetMemory()); addToast("🔄 Memoria restaurada", "info"); }}>
               🔄 Restaurar semilla
             </button>
+            {/* Entrenamiento desde PDF ya rellenado */}
+            <div style={{ marginTop: "1rem", paddingTop: "1rem", borderTop: "1px solid var(--px-border)" }}>
+              <p className="px-help" style={{ fontWeight: 600, marginBottom: "0.4rem", color: "var(--px-text)" }}>
+                📚 Entrenar con PDF ya rellenado
+              </p>
+              <p className="px-help" style={{ marginBottom: "0.6rem" }}>
+                Sube un PDF que ya diligenciaste a mano. La app aprende las posiciones exactas para futuras veces.
+              </p>
+              <label
+                htmlFor="train-pdf-input"
+                className="px-btn px-btn--ghost px-btn--sm"
+                style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem", cursor: "pointer" }}
+              >
+                🎓 Subir PDF rellenado
+                <input
+                  id="train-pdf-input"
+                  hidden
+                  type="file"
+                  accept="application/pdf"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleTrainPdf(file);
+                      e.target.value = "";
+                    }
+                  }}
+                />
+              </label>
+            </div>
           </section>
 
         </aside>
