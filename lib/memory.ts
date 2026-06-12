@@ -222,6 +222,10 @@ function fieldContext(field: PdfField): string {
   return `${field.tipo}:${normalize(field.nombre)}`;
 }
 
+function compactMemoryValue(value: unknown): string {
+  return normalize(value).replace(/[^a-z0-9]/g, "");
+}
+
 export function learnFromConfirmation(
   memory: LocalMemory,
   memoryKey: string,
@@ -315,11 +319,12 @@ export function trainFromFilledPdf(
 ): { memory: LocalMemory; learned: number } {
   const next: LocalMemory = structuredClone(memory);
 
-  // Construir mapa inverso: valor normalizado → clave del contratista
+  // Construir mapa inverso: valor compacto → clave del contratista
   const inverseMap: Map<string, string> = new Map();
   for (const [key, value] of Object.entries(contractorData)) {
-    if (value && value.length > 2) {
-      inverseMap.set(normalize(value), key);
+    const compact = compactMemoryValue(value);
+    if (compact.length >= 4) {
+      inverseMap.set(compact, key);
     }
   }
 
@@ -327,36 +332,37 @@ export function trainFromFilledPdf(
   const trainedFields: PdfField[] = [];
 
   for (const field of fields) {
-    const normalizedValue = normalize(field.valor);
-    if (!normalizedValue || normalizedValue.length < 2) {
-      trainedFields.push({ ...field, source: "memoria", confianza: 0.5 });
-      continue;
-    }
+    const compactValue = compactMemoryValue(field.valor);
+    let matchedKey: string | undefined =
+      field.campoCsv && compactMemoryValue(contractorData[field.campoCsv]).length >= 4
+        ? field.campoCsv
+        : undefined;
 
-    // Buscar coincidencia exacta o parcial con datos del contratista
-    let matchedKey: string | undefined;
     for (const [val, key] of inverseMap) {
-      if (normalizedValue === val || (val.length > 4 && normalizedValue.includes(val))) {
+      if (matchedKey) break;
+      if (compactValue === val || (val.length >= 4 && compactValue.includes(val))) {
         matchedKey = key;
         break;
       }
     }
 
-    if (matchedKey) {
-      learned++;
-      trainedFields.push({
-        ...field,
-        source: "memoria",
-        confianza: 0.99,
-        campoCsv: matchedKey,
-        iaX: field.x,
-        iaY: field.y,
-        suggestedX: field.x,
-        suggestedY: field.y
-      });
-    } else {
-      trainedFields.push({ ...field, source: "memoria", confianza: 0.75 });
-    }
+    if (!matchedKey) continue;
+
+    learned++;
+    trainedFields.push({
+      ...field,
+      source: "memoria",
+      confianza: 0.99,
+      campoCsv: matchedKey,
+      iaX: field.x,
+      iaY: field.y,
+      suggestedX: field.x,
+      suggestedY: field.y
+    });
+  }
+
+  if (!trainedFields.length) {
+    return { memory, learned: 0 };
   }
 
   const code = detectCode(memoryKey);

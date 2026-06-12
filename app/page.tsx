@@ -3,7 +3,7 @@
 import { PublicClientApplication, type AccountInfo } from "@azure/msal-browser";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { autocompleteFields, deduplicateFields, summarizeAutocomplete } from "../lib/autocomplete";
+import { autocompleteFields, deduplicateFields, normalize, summarizeAutocomplete } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
 import { applyMemoryOffsets, detectCode, isLearned, learnFromConfirmation, loadMemory, memoryHints, resetMemory, trainFromFilledPdf } from "../lib/memory";
 import { extractPageStructure, type PageStructure } from "../lib/pdfTextExtract";
@@ -223,6 +223,142 @@ function normalizeAiField(raw: Record<string, unknown>, pageNum: number, index: 
     manualSize: false,
     contextoTexto: String(raw.contextoTexto || raw.context || raw.source_zone || raw.labelContext || "")
   };
+}
+
+function compactMatchValue(value: unknown): string {
+  return normalize(value).replace(/[^a-z0-9]/g, "");
+}
+
+function trainingLabelForKey(key: string): string {
+  const labels: Record<string, string> = {
+    razon_social: "Razon Social",
+    nit: "NIT",
+    representante_legal: "Representante Legal",
+    documento_identidad: "Documento de Identidad",
+    cc: "Documento de Identidad",
+    direccion: "Direccion",
+    ciudad: "Ciudad",
+    departamento: "Departamento",
+    pais: "Pais",
+    telefono: "Telefono",
+    correo_contacto: "Correo",
+    correo: "Correo",
+    actividad_economica: "Actividad Economica",
+    regimen_tributario: "Regimen Tributario",
+    responsable_iva: "Responsable IVA",
+    gran_contribuyente: "Gran Contribuyente",
+    autorretenedor_renta: "Autorretenedor Renta",
+    tamano_empresa: "Tamano Empresa",
+    fecha: "Fecha",
+    ciudad_fecha: "Ciudad y Fecha"
+  };
+  return labels[key] || key.replace(/_/g, " ");
+}
+
+function relevantTrainingValues(contractorData: Record<string, string>) {
+  const preferredKeys = [
+    "razon_social",
+    "nit",
+    "representante_legal",
+    "documento_identidad",
+    "cc",
+    "direccion",
+    "ciudad",
+    "departamento",
+    "pais",
+    "telefono",
+    "correo_contacto",
+    "correo",
+    "actividad_economica",
+    "regimen_tributario",
+    "tamano_empresa",
+    "fecha",
+    "ciudad_fecha"
+  ];
+
+  const seen = new Set<string>();
+  return preferredKeys
+    .map((key) => {
+      const value = String(contractorData[key] || "").trim();
+      const compact = compactMatchValue(value);
+      return { key, value, compact };
+    })
+    .filter((item) => {
+      if (!item.value || item.compact.length < 4) return false;
+      if (["si", "no", "true", "false"].includes(normalize(item.value))) return false;
+      if (seen.has(item.compact)) return false;
+      seen.add(item.compact);
+      return true;
+    });
+}
+
+function groupTextItemsByLine(items: PageStructure["textItems"]) {
+  const lines: Array<PageStructure["textItems"]> = [];
+  for (const item of items) {
+    const line = lines.find((current) => Math.abs(current[0].y - item.y) < 4);
+    if (line) {
+      line.push(item);
+    } else {
+      lines.push([item]);
+    }
+  }
+  return lines.map((line) => line.sort((a, b) => a.x - b.x));
+}
+
+function buildTrainingFieldsFromPage(pageStruct: PageStructure, contractorData: Record<string, string>): PdfField[] {
+  const fields: PdfField[] = [];
+  const values = relevantTrainingValues(contractorData);
+  const lines = groupTextItemsByLine(pageStruct.textItems);
+
+  for (const { key, value, compact } of values) {
+    for (const line of lines) {
+      const maxWindow = Math.min(10, line.length);
+      for (let start = 0; start < line.length; start += 1) {
+        for (let end = start; end < Math.min(line.length, start + maxWindow); end += 1) {
+          const windowItems = line.slice(start, end + 1);
+          const windowText = windowItems.map((item) => item.str).join(" ");
+          const windowCompact = compactMatchValue(windowText);
+          if (!windowCompact || !windowCompact.includes(compact)) continue;
+
+          const x1 = Math.min(...windowItems.map((item) => item.x));
+          const x2 = Math.max(...windowItems.map((item) => item.x + item.w));
+          const y = Math.min(...windowItems.map((item) => item.y));
+          const h = Math.max(...windowItems.map((item) => item.h));
+          const fontSize = Math.max(7, Math.round(Math.max(...windowItems.map((item) => item.fontSize || 9))));
+          const nearbyLabel = line
+            .filter((item) => item.x < x1 - 4)
+            .map((item) => item.str)
+            .join(" ")
+            .slice(-80);
+
+          fields.push({
+            id: `train_${pageStruct.pageNum}_${key}_${fields.length}`,
+            pageNum: pageStruct.pageNum,
+            nombre: nearbyLabel || trainingLabelForKey(key),
+            valor: value,
+            tipo: "texto",
+            x: Math.round(x1),
+            y: Math.round(y),
+            w: Math.max(40, Math.round(x2 - x1 + 6)),
+            h: Math.max(14, Math.round(h + 4)),
+            fontSize,
+            confianza: 0.99,
+            source: "memoria",
+            campoCsv: key,
+            iaX: Math.round(x1),
+            iaY: Math.round(y),
+            suggestedX: Math.round(x1),
+            suggestedY: Math.round(y),
+            contextoTexto: nearbyLabel || `filled_pdf:${key}`
+          });
+          start = line.length;
+          break;
+        }
+      }
+    }
+  }
+
+  return deduplicateFields(fields);
 }
 
 // memoryHints is now imported from lib/memory.ts
@@ -859,29 +995,18 @@ export default function Home() {
       const fileCode = detectCode(file.name);
       const trainingKey = contentCode || fileCode;
 
-      // Extraer todos los campos de texto detectados en las páginas
-      const allFields: import("../lib/types").PdfField[] = [];
+      // Extraer los valores reales ya escritos en el PDF diligenciado.
+      // Esto aprende coordenadas desde textos como PROVEXPRESS SAS, NIT, representante, correo, etc.
+      const allFields: PdfField[] = [];
       for (let index = 0; index < document.numPages; index++) {
         const pageStruct = await extractPageStructure(document, index);
-        for (const zone of pageStruct.emptyZones) {
-          // Para entrenamiento, buscamos el texto que ESTÁ en el PDF (ya rellenado)
-          // En el contexto del entrenamiento, la zona ya tiene valor en el PDF real
-          allFields.push({
-            id: `train_${index}_${allFields.length}`,
-            pageNum: index,
-            nombre: zone.label,
-            valor: zone.labelContext || zone.label,
-            tipo: "texto",
-            x: zone.x,
-            y: zone.y,
-            w: zone.w,
-            h: zone.h,
-            fontSize: zone.fontSize,
-            confianza: 0.75,
-            source: "ia",
-            contextoTexto: zone.context
-          });
-        }
+        allFields.push(...buildTrainingFieldsFromPage(pageStruct, contractorData));
+      }
+
+      if (!allFields.length) {
+        setStatus(`No encontré datos de Provexpress como texto en "${file.name}". Si el PDF está en blanco o escaneado como imagen, usa el flujo normal de IA y corrige/genera para aprender.`);
+        addToast("No encontré valores entrenables en ese PDF", "warning");
+        return;
       }
 
       const { memory: updatedMemory, learned } = trainFromFilledPdf(
@@ -891,8 +1016,13 @@ export default function Home() {
         contractorData
       );
       setMemory(updatedMemory);
-      setStatus(`✅ Entrenamiento completado: ${learned} campos aprendidos para "${trainingKey}".`);
-      addToast(`🎓 ${learned} campos aprendidos desde "${file.name}"`, "success");
+      if (learned > 0) {
+        setStatus(`✅ Entrenamiento completado: ${learned} campos aprendidos para "${trainingKey}".`);
+        addToast(`🎓 ${learned} campos aprendidos desde "${file.name}"`, "success");
+      } else {
+        setStatus(`No pude asociar los textos encontrados con los datos de Provexpress. Revisa que el PDF esté diligenciado con estos mismos datos.`);
+        addToast("0 campos aprendidos: no hubo coincidencias con Provexpress", "warning");
+      }
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Error desconocido";
       setStatus(`Error en entrenamiento: ${msg}`);
