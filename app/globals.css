@@ -950,6 +950,9 @@ body {
 
 .modal {
   width: min(520px, 100%);
+  max-height: 90vh; /* Limitar altura al 90% de la ventana */
+  display: flex;
+  flex-direction: column;
   border-radius: 20px;
   background: var(--px-surface);
   border: 1px solid var(--px-border);
@@ -969,6 +972,7 @@ body {
   justify-content: space-between;
   padding: 20px 24px 16px;
   border-bottom: 1px solid var(--px-border);
+  flex-shrink: 0; /* Evitar que el header se encoja */
 }
 
 .modal-title {
@@ -1002,6 +1006,8 @@ body {
 
 .modal-body {
   padding: 20px 24px 24px;
+  overflow-y: auto; /* Permitir scroll vertical */
+  overflow-x: hidden;
 }
 
 .modal-section-label {
