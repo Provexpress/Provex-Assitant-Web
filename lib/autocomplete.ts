@@ -383,6 +383,10 @@ function resolveCheckbox(field: PdfField, contractorData: ContractorData): { val
   return { value: shouldMark ? "X" : "", key: best.concept.key };
 }
 
+
+/** Keys que siempre deben tomar el valor ACTUAL del contratista (nunca el memorizado) */
+const ALWAYS_REFRESH_KEYS = new Set(["fecha", "fecha_hoy", "ciudad_fecha", "ciudad_y_fecha"]);
+
 export function autocompleteField(field: PdfField, contractorData: ContractorData): PdfField {
   const haystack = fieldHaystack(field);
 
@@ -427,6 +431,19 @@ export function autocompleteField(field: PdfField, contractorData: ContractorDat
     };
   }
 
+  // ── Campos de memoria: refrescar datos que siempre cambian (fecha de hoy) ──
+  if (field.source === "memoria" && field.campoCsv) {
+    const shouldRefresh = ALWAYS_REFRESH_KEYS.has(field.campoCsv) || !field.valor?.trim();
+    if (shouldRefresh) {
+      const freshValue = contractorValue(contractorData, field.campoCsv);
+      if (freshValue) {
+        return { ...field, valor: freshValue, confianza: Math.max(field.confianza, 0.95) };
+      }
+    }
+    // Campo de memoria con valor válido que no necesita refresh → conservar
+    return field;
+  }
+
   const match = matchField(field.nombre, field.contextoTexto || "");
   if (!match) {
     return field;
@@ -461,6 +478,7 @@ export function autocompleteField(field: PdfField, contractorData: ContractorDat
     confianza: Math.max(field.confianza || 0, 0.82)
   };
 }
+
 
 export function autocompleteFields(fields: PdfField[], contractorData: ContractorData): PdfField[] {
   return fields.map((field) => autocompleteField(field, contractorData));

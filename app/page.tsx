@@ -5,7 +5,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { autocompleteFields, deduplicateFields, normalize, summarizeAutocomplete } from "../lib/autocomplete";
 import { getContractorData, getFieldOptions } from "../lib/contractor";
-import { applyMemoryOffsets, detectCode, isLearned, learnFromConfirmation, loadMemory, memoryHints, resetMemory, trainFromFilledPdf } from "../lib/memory";
+import { applyMemoryOffsets, findMemoryKey, isLearned, learnFromConfirmation, loadMemory, memoryHints, resetMemory, trainFromFilledPdf } from "../lib/memory";
 import { extractPageStructure, type PageStructure } from "../lib/pdfTextExtract";
 import type { FieldOption, FieldType, LocalMemory, PdfField } from "../lib/types";
 
@@ -451,6 +451,7 @@ export default function Home() {
   const [memory, setMemory] = useState<LocalMemory | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PdfJsDocument | null>(null);
   const [pdfBytes, setPdfBytes] = useState<ArrayBuffer | null>(null);
+  const [pdfTextContent, setPdfTextContent] = useState("");
   const [fileName, setFileName] = useState("");
   const [currentMemoryKey, setCurrentMemoryKey] = useState("");
   const [pageNum, setPageNum] = useState(0);
@@ -637,14 +638,15 @@ export default function Home() {
     const firstPage = await document.getPage(1);
     const firstViewport = firstPage.getViewport({ scale: 1 });
     const pdfText = await extractPdfText(document);
-    const contentCode = detectCode(`${file.name}\n${pdfText}`);
-    const fileCode = detectCode(file.name);
-    const knownKey = activeMemory.formulariosConocidos[contentCode] ? contentCode : activeMemory.formulariosConocidos[fileCode] ? fileCode : "";
+    
+    // Usar nueva lógica de fingerprint + detectCode
+    const knownKey = findMemoryKey(activeMemory, file.name, pdfText);
 
     setPdfBytes(bytes);
+    setPdfTextContent(pdfText);
     setPdfDoc(document);
     setFileName(file.name);
-    setCurrentMemoryKey(contentCode || fileCode);
+    setCurrentMemoryKey(knownKey);
     setPageNum(0);
     setPageSize({ width: firstViewport.width, height: firstViewport.height });
     setFields([]);
@@ -913,7 +915,7 @@ export default function Home() {
             body: JSON.stringify({
               structuredText: pageStruct.structuredText,
               contractorData,
-              memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+              memoryHints: activeMemory ? memoryHints(activeMemory, currentMemoryKey) : "",
               emptyZones: pageStruct.emptyZones
             })
           });
@@ -939,7 +941,7 @@ export default function Home() {
             body: JSON.stringify({
               imageDataUrl: canvas.toDataURL("image/png"),
               contractorData,
-              memoryHints: activeMemory ? memoryHints(activeMemory) : "",
+              memoryHints: activeMemory ? memoryHints(activeMemory, currentMemoryKey) : "",
               pageNumber: index + 1,
               pageWidth: pageStruct.width,
               pageHeight: pageStruct.height
@@ -955,7 +957,7 @@ export default function Home() {
       }
 
       const completedFields = autocompleteFields(detected, contractorData);
-      const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields) : completedFields;
+      const adjustedFields = activeMemory ? applyMemoryOffsets(activeMemory, completedFields, currentMemoryKey) : completedFields;
       // Deduplicar antes de mostrar
       const deduped = deduplicateFields(autoSizeFields(adjustedFields, pageSize.width));
       const summary = summarizeAutocomplete(deduped);
@@ -991,9 +993,7 @@ export default function Home() {
       const document = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
       const activeMemory = memory || loadMemory();
       const pdfText = await extractPdfText(document);
-      const contentCode = detectCode(`${file.name}\n${pdfText}`);
-      const fileCode = detectCode(file.name);
-      const trainingKey = contentCode || fileCode;
+      const trainingKey = findMemoryKey(activeMemory, file.name, pdfText);
 
       // Extraer los valores reales ya escritos en el PDF diligenciado.
       // Esto aprende coordenadas desde textos como PROVEXPRESS SAS, NIT, representante, correo, etc.
@@ -1013,7 +1013,8 @@ export default function Home() {
         activeMemory,
         trainingKey,
         allFields,
-        contractorData
+        contractorData,
+        pdfText
       );
       setMemory(updatedMemory);
       if (learned > 0) {
@@ -1075,7 +1076,7 @@ export default function Home() {
       if (downloadUrl) URL.revokeObjectURL(downloadUrl);
       setDownloadUrl(URL.createObjectURL(blob));
       if (memory) {
-        const learned = learnFromConfirmation(memory, currentMemoryKey || fileName, fields, [fileName]);
+        const learned = learnFromConfirmation(memory, currentMemoryKey || fileName, fields, [fileName], pdfTextContent);
         setMemory(learned);
         setFields((current) =>
           current.map((field) => ({

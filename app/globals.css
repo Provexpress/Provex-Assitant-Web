@@ -1097,20 +1097,104 @@ body {
 }
 
 /* ── Responsive ──────────────────────────────────────────────────── */
-@media (max-width: 980px) {
+
+/* md: Tablet (max-width: 979px) */
+@media (max-width: 979px) {
   .studio-shell {
     grid-template-columns: 1fr;
   }
   .side-panel {
     position: static;
   }
-  .field-list { max-height: 200px; }
+  .editor-toolbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    /* Hide scrollbar for a cleaner look */
+    -ms-overflow-style: none;  
+    scrollbar-width: none;  
+  }
+  .editor-toolbar::-webkit-scrollbar { 
+    display: none; 
+  }
+  .field-editor-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .stats-bar {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
-@media (max-width: 640px) {
-  .app-frame { width: calc(100% - 16px); }
-  .editor-toolbar { gap: 2px; padding: 6px 8px; }
-  .toolbar-btn { min-width: 30px; height: 32px; font-size: 0.75rem; }
-  .drop-zone { min-height: 280px; padding: 24px 16px; }
-  .drop-zone-icon { font-size: 48px; }
+/* sm: Mobile landscape / Small tablet (max-width: 767px) */
+@media (max-width: 767px) {
+  .app-frame {
+    width: calc(100% - 16px);
+  }
+  .topbar {
+    padding: 0 16px;
+  }
+  .topbar span {
+    display: none; /* Oculta nombre de usuario, deja avatar */
+  }
+  .modal-grid {
+    grid-template-columns: 1fr;
+  }
+  .drop-zone {
+    min-height: 220px;
+    padding: 24px 16px;
+  }
+  .drop-zone-icon {
+    font-size: 48px;
+  }
+  .toast-container {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .toast-message {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* xs: Mobile portrait (max-width: 479px) */
+@media (max-width: 479px) {
+  .stats-bar {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .stats-bar .stat-card {
+    padding: 12px;
+  }
+  .stats-bar .stat-label {
+    display: none; /* Ocultar texto largo */
+  }
+  .stats-bar .stat-value {
+    font-size: 1.25rem;
+  }
+  .editor-workspace {
+    overflow-x: auto; /* Permitir scroll horizontal en el canvas si el PDF es más ancho */
+  }
+  .field-editor-row {
+    grid-template-columns: 1fr;
+  }
+  .toolbar-btn {
+    min-width: 30px;
+    height: 32px;
+    font-size: 0.75rem;
+    padding: 0 8px;
+  }
+  .draggable-field {
+    touch-action: none; /* Evita que el navegador haga scroll al arrastrar el campo */
+  }
+}
+
+/* ── Extras ──────────────────────────────────────────────────────── */
+@media (hover: none) {
+  .resize-handle {
+    width: 12px;
+    height: 12px;
+  }
 }
